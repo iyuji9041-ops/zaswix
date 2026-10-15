@@ -1,0 +1,7 @@
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="netflix_red">#FFE50914</color>
+    <color name="netflix_dark">#FF141414</color>
+    <color name="netflix_card">#FF1E1E1E</color>
+</resources>
