@@ -66,7 +66,7 @@ fun HomeScreen(
     val plugins by pluginManager.plugins.collectAsState()
     val selectedPluginId by pluginManager.selectedPluginId.collectAsState()
     val categories by mediaRepository.getHomeCategories(selectedPluginId).collectAsState(initial = emptyList())
-    val heroBannerItems = remember { mediaRepository.getHeroBannerItems() }
+    val heroBannerItems by mediaRepository.heroBannerItems.collectAsState()
     var showProviderDialog by remember { mutableStateOf(false) }
 
     val activePlugin = remember(plugins, selectedPluginId) {

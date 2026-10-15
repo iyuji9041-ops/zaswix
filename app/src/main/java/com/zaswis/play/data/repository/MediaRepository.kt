@@ -7,8 +7,18 @@ import com.zaswis.play.data.model.MediaType
 import com.zaswis.play.data.model.StreamSource
 import com.zaswis.play.extractor.CloudstreamProvider
 import com.zaswis.play.extractor.ExtractorRegistry
+import com.zaswis.play.extractor.HomePagePayload
+import com.zaswis.play.extractor.ScrapedCategoryRow
+import com.zaswis.play.extractor.ScrapedMediaItem
+import com.zaswis.play.extractor.ZaswixMultiScraper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 
@@ -63,9 +73,188 @@ class MediaRepository {
     }
 
     /**
-     * Hero Banner items (5-6 titles with ultra high-res backdrops)
+     * StateFlow exposing live heroBannerItems combining top featured hero slides
      */
-    fun getHeroBannerItems(): List<MediaItem> {
+    private val _heroBannerItems = MutableStateFlow<List<MediaItem>>(getDefaultHeroBannerItems())
+    val heroBannerItems: StateFlow<List<MediaItem>> = _heroBannerItems.asStateFlow()
+
+    fun getHeroBannerItems(): List<MediaItem> = _heroBannerItems.value
+
+    /**
+     * Featured hero fallback for single-hero banner consumers
+     */
+    fun getFeaturedHero(pluginId: String = "all"): MediaItem {
+        val heroes = _heroBannerItems.value.ifEmpty { getDefaultHeroBannerItems() }
+        return when (pluginId.lowercase()) {
+            "bollyflix" -> heroes.find { it.providerName.contains("Bolly", true) } ?: heroes[0]
+            "toonstream" -> heroes.find { it.providerName.contains("Toon", true) } ?: heroes.getOrElse(3) { heroes[0] }
+            "vegamovies" -> heroes.find { it.providerName.contains("Vega", true) } ?: heroes.getOrElse(1) { heroes[0] }
+            "multimovies" -> heroes.find { it.providerName.contains("MultiMovies", true) } ?: heroes[0]
+            "multinime" -> heroes.find { it.providerName.contains("MultiNime", true) } ?: heroes.getOrElse(2) { heroes[0] }
+            else -> heroes[0]
+        }
+    }
+
+    /**
+     * Concurrent scraper runner using async/awaitAll across all working sites
+     */
+    suspend fun fetchScrapedHomePagePayload(pluginId: String = "all"): HomePagePayload = withContext(Dispatchers.IO) {
+        coroutineScope {
+            when (pluginId.lowercase()) {
+                "multimovies" -> ZaswixMultiScraper.scrapeMultiMovies()
+                "vegamovies" -> ZaswixMultiScraper.scrapeVegaMovies()
+                "multinime" -> ZaswixMultiScraper.scrapeMultinime()
+                "toonstream" -> ZaswixMultiScraper.scrapeToonStream()
+                "bollyflix" -> ZaswixMultiScraper.scrapeBollyFlix()
+                else -> {
+                    val mmDeferred = async { ZaswixMultiScraper.scrapeMultiMovies() }
+                    val vmDeferred = async { ZaswixMultiScraper.scrapeVegaMovies() }
+                    val mnDeferred = async { ZaswixMultiScraper.scrapeMultinime() }
+                    val tsDeferred = async { ZaswixMultiScraper.scrapeToonStream() }
+                    val bfDeferred = async { ZaswixMultiScraper.scrapeBollyFlix() }
+
+                    val mm = try { mmDeferred.await() } catch (e: Exception) { HomePagePayload(emptyList(), emptyList()) }
+                    val vm = try { vmDeferred.await() } catch (e: Exception) { HomePagePayload(emptyList(), emptyList()) }
+                    val mn = try { mnDeferred.await() } catch (e: Exception) { HomePagePayload(emptyList(), emptyList()) }
+                    val ts = try { tsDeferred.await() } catch (e: Exception) { HomePagePayload(emptyList(), emptyList()) }
+                    val bf = try { bfDeferred.await() } catch (e: Exception) { HomePagePayload(emptyList(), emptyList()) }
+
+                    val combinedHero = (mm.heroBannerItems + vm.heroBannerItems + mn.heroBannerItems + ts.heroBannerItems + bf.heroBannerItems)
+                        .distinctBy { it.title }
+                        .take(10)
+
+                    val combinedRows = (mm.categoryRows + vm.categoryRows + mn.categoryRows + ts.categoryRows + bf.categoryRows)
+                        .filter { it.items.isNotEmpty() }
+
+                    HomePagePayload(combinedHero, combinedRows)
+                }
+            }
+        }
+    }
+
+    /**
+     * Homepage categories: Emits instant curated rows then live scraped rows from all working sites
+     */
+    fun getHomeCategories(pluginId: String = "all"): Flow<List<MediaCategory>> = flow {
+        // 1. Instant display with rich categories so user never sees a blank screen
+        val curated = getCuratedCategories(pluginId)
+        emit(curated)
+
+        // 2. Concurrently scrape live sources across all 5 sites
+        try {
+            val payload = fetchScrapedHomePagePayload(pluginId)
+
+            if (payload.heroBannerItems.isNotEmpty()) {
+                _heroBannerItems.value = payload.heroBannerItems.map { it.toMediaItem() }
+            }
+
+            if (payload.categoryRows.isNotEmpty()) {
+                val liveCategories = payload.categoryRows.map { it.toMediaCategory() }
+                emit(liveCategories)
+            }
+        } catch (e: Exception) {
+            // Keep curated categories on network failure
+        }
+    }
+
+    private fun ScrapedMediaItem.toMediaItem(): MediaItem {
+        val mediaType = when (type.lowercase()) {
+            "series", "show", "tv", "web series" -> MediaType.SERIES
+            "anime" -> MediaType.ANIME
+            else -> MediaType.MOVIE
+        }
+        return MediaItem(
+            id = id,
+            title = title,
+            posterUrl = posterUrl,
+            backdropUrl = backdropUrl.ifEmpty { posterUrl },
+            overview = synopsis.ifEmpty { title },
+            rating = rating.ifEmpty { "8.5" },
+            year = year.ifEmpty { "2024" },
+            type = mediaType,
+            genres = listOfNotNull(type.takeIf { it.isNotBlank() }, quality.takeIf { it.isNotBlank() }),
+            durationOrSeasons = quality.ifEmpty { "HD" },
+            providerName = providerName,
+            pageUrl = url
+        )
+    }
+
+    private fun ScrapedCategoryRow.toMediaCategory(): MediaCategory {
+        return MediaCategory(
+            title = categoryTitle,
+            items = items.map { it.toMediaItem() }
+        )
+    }
+
+    private fun getCuratedCategories(pluginId: String = "all"): List<MediaCategory> {
+        val allCategories = listOf(
+            MediaCategory(
+                title = "Trending Now",
+                items = getTrendingNowItems()
+            ),
+            MediaCategory(
+                title = "Top 10 Today",
+                items = getTop10TodayItems()
+            ),
+            MediaCategory(
+                title = "Sci-Fi & Cyber",
+                items = getSciFiAndCyberItems()
+            ),
+            MediaCategory(
+                title = "Action Thrillers",
+                items = getActionThrillersItems()
+            ),
+            MediaCategory(
+                title = "Mystery Series",
+                items = getMysterySeriesItems()
+            ),
+            MediaCategory(
+                title = "Newly Added",
+                items = getNewlyAddedItems()
+            )
+        )
+
+        return if (pluginId.isNotBlank() && pluginId != "bollyflix" && pluginId != "all") {
+            val targetProvider = when (pluginId.lowercase()) {
+                "vegamovies" -> "VegaMovies"
+                "toonstream" -> "ToonStream"
+                "multinime" -> "MultiNime"
+                "multimovies" -> "MultiMovies"
+                "netmirror" -> "NetMirror"
+                "plex" -> "Plex Stream"
+                else -> ""
+            }
+            if (targetProvider.isNotEmpty()) {
+                allCategories.map { category ->
+                    val providerItems = category.items.filter { it.providerName.contains(targetProvider, ignoreCase = true) }
+                    val otherItems = category.items.filterNot { it.providerName.contains(targetProvider, ignoreCase = true) }
+                    category.copy(items = providerItems + otherItems)
+                }
+            } else {
+                allCategories
+            }
+        } else {
+            allCategories
+        }
+    }
+
+    fun getAllSearchItems(): Flow<List<MediaItem>> = flow {
+        val all = (
+            getTrendingNowItems() +
+            getTop10TodayItems() +
+            getSciFiAndCyberItems() +
+            getActionThrillersItems() +
+            getMysterySeriesItems() +
+            getNewlyAddedItems() +
+            _heroBannerItems.value
+        ).distinctBy { it.id }
+        emit(all)
+    }
+
+    /**
+     * Default curated hero banner items
+     */
+    fun getDefaultHeroBannerItems(): List<MediaItem> {
         return listOf(
             MediaItem(
                 id = "hero_dune2",
@@ -154,92 +343,6 @@ class MediaRepository {
                 providerName = "NetMirror"
             )
         )
-    }
-
-    /**
-     * Featured hero fallback for single-hero banner consumers
-     */
-    fun getFeaturedHero(pluginId: String = "bollyflix"): MediaItem {
-        val heroes = getHeroBannerItems()
-        return when (pluginId) {
-            "bollyflix" -> heroes.find { it.id == "hero_drishyam" } ?: heroes[0]
-            "toonstream" -> heroes.find { it.id == "hero_sololeveling" } ?: heroes[3]
-            "vegamovies" -> heroes.find { it.id == "hero_deadpool" } ?: heroes[1]
-            "multimovies" -> heroes.find { it.id == "hero_dune2" } ?: heroes[0]
-            "netmirror" -> heroes.find { it.id == "hero_theboys" } ?: heroes[5]
-            else -> heroes.find { it.id == "hero_interstellar" } ?: heroes[4]
-        }
-    }
-
-    /**
-     * Homepage categories: Returns at least 6 distinct categories, each with 10–12 items
-     */
-    fun getHomeCategories(pluginId: String = "bollyflix"): Flow<List<MediaCategory>> = flow {
-        val allCategories = listOf(
-            MediaCategory(
-                title = "Trending Now",
-                items = getTrendingNowItems()
-            ),
-            MediaCategory(
-                title = "Top 10 Today",
-                items = getTop10TodayItems()
-            ),
-            MediaCategory(
-                title = "Sci-Fi & Cyber",
-                items = getSciFiAndCyberItems()
-            ),
-            MediaCategory(
-                title = "Action Thrillers",
-                items = getActionThrillersItems()
-            ),
-            MediaCategory(
-                title = "Mystery Series",
-                items = getMysterySeriesItems()
-            ),
-            MediaCategory(
-                title = "Newly Added",
-                items = getNewlyAddedItems()
-            )
-        )
-
-        // If a specific plugin is chosen, re-rank or prioritize items from that provider first
-        val result = if (pluginId.isNotBlank() && pluginId != "bollyflix" && pluginId != "all") {
-            val targetProvider = when (pluginId) {
-                "vegamovies" -> "VegaMovies"
-                "toonstream" -> "ToonStream"
-                "multinime" -> "MultiNime"
-                "multimovies" -> "MultiMovies"
-                "netmirror" -> "NetMirror"
-                "plex" -> "Plex Stream"
-                else -> ""
-            }
-            if (targetProvider.isNotEmpty()) {
-                allCategories.map { category ->
-                    val providerItems = category.items.filter { it.providerName.contains(targetProvider, ignoreCase = true) }
-                    val otherItems = category.items.filterNot { it.providerName.contains(targetProvider, ignoreCase = true) }
-                    category.copy(items = providerItems + otherItems)
-                }
-            } else {
-                allCategories
-            }
-        } else {
-            allCategories
-        }
-
-        emit(result)
-    }
-
-    fun getAllSearchItems(): Flow<List<MediaItem>> = flow {
-        val all = (
-            getTrendingNowItems() +
-            getTop10TodayItems() +
-            getSciFiAndCyberItems() +
-            getActionThrillersItems() +
-            getMysterySeriesItems() +
-            getNewlyAddedItems() +
-            getHeroBannerItems()
-        ).distinctBy { it.id }
-        emit(all)
     }
 
     // -----------------------------------------------------------------------------------------
