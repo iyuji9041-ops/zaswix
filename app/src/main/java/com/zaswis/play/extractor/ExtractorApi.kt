@@ -16,14 +16,8 @@ abstract class ExtractorApi {
     abstract val mainUrl: String
     open val requiresReferer: Boolean = false
 
-    protected val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
-
-    protected val defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    protected val client: OkHttpClient get() = CloudstreamProvider.client
+    protected val defaultUserAgent: String get() = CloudstreamProvider.DEFAULT_USER_AGENT
 
     open fun canHandle(url: String): Boolean {
         val lower = url.lowercase()

@@ -145,11 +145,8 @@ fun PlayerScreen(
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
 
     val httpDataSourceFactory = remember {
-        DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15000)
-            .setReadTimeoutMs(20000)
+        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(com.zaswis.play.extractor.CloudstreamProvider.client)
+            .setUserAgent(com.zaswis.play.extractor.CloudstreamProvider.DEFAULT_USER_AGENT)
     }
 
     val exoPlayer = remember {
