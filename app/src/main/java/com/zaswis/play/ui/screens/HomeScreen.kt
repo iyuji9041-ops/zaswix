@@ -66,7 +66,7 @@ fun HomeScreen(
     val plugins by pluginManager.plugins.collectAsState()
     val selectedPluginId by pluginManager.selectedPluginId.collectAsState()
     val categories by mediaRepository.getHomeCategories(selectedPluginId).collectAsState(initial = emptyList())
-    val heroItem = remember(selectedPluginId) { mediaRepository.getFeaturedHero(selectedPluginId) }
+    val heroBannerItems = remember { mediaRepository.getHeroBannerItems() }
     var showProviderDialog by remember { mutableStateOf(false) }
 
     val activePlugin = remember(plugins, selectedPluginId) {
@@ -82,10 +82,10 @@ fun HomeScreen(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 80.dp)
         ) {
-            // Hero Banner at top
+            // Hero Banner at top (Netflix HorizontalPager)
             item {
                 HeroBanner(
-                    mediaItem = heroItem,
+                    items = heroBannerItems,
                     onPlayClick = onPlayClick,
                     onDetailsClick = onMediaClick
                 )

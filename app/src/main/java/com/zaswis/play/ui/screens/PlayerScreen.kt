@@ -54,11 +54,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.zaswis.play.data.model.StreamSource
+import com.zaswis.play.extractor.CloudstreamProvider
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -145,8 +148,35 @@ fun PlayerScreen(
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
 
     val httpDataSourceFactory = remember {
-        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(com.zaswis.play.extractor.CloudstreamProvider.client)
-            .setUserAgent(com.zaswis.play.extractor.CloudstreamProvider.DEFAULT_USER_AGENT)
+        OkHttpDataSource.Factory(CloudstreamProvider.client)
+            .setUserAgent(CloudstreamProvider.DEFAULT_USER_AGENT)
+    }
+
+    fun prepareHeadersForSource(source: StreamSource) {
+        val effectiveHeaders = mutableMapOf<String, String>()
+        effectiveHeaders["User-Agent"] = CloudstreamProvider.DEFAULT_USER_AGENT
+        if (source.referer.isNotEmpty()) {
+            effectiveHeaders["Referer"] = source.referer
+        } else if (source.headers.containsKey("Referer")) {
+            effectiveHeaders["Referer"] = source.headers["Referer"].orEmpty()
+        }
+        effectiveHeaders.putAll(source.headers)
+        httpDataSourceFactory.setDefaultRequestProperties(effectiveHeaders)
+    }
+
+    fun buildExoMediaItem(source: StreamSource): ExoMediaItem {
+        val builder = ExoMediaItem.Builder()
+            .setUri(source.url)
+
+        val isHls = source.isM3u8 || source.url.contains(".m3u8", ignoreCase = true)
+        val isMp4 = source.url.contains(".mp4", ignoreCase = true)
+
+        if (isHls) {
+            builder.setMimeType(MimeTypes.APPLICATION_M3U8)
+        } else if (isMp4) {
+            builder.setMimeType(MimeTypes.APPLICATION_MP4)
+        }
+        return builder.build()
     }
 
     val exoPlayer = remember {
@@ -169,15 +199,12 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(currentSource?.url) {
-        val url = currentSource?.url
+        val source = currentSource
+        val url = source?.url
         if (!url.isNullOrBlank()) {
-            currentSource.headers.let { headers ->
-                if (headers.isNotEmpty()) {
-                    httpDataSourceFactory.setDefaultRequestProperties(headers)
-                }
-            }
+            prepareHeadersForSource(source)
             try {
-                val mediaItem = ExoMediaItem.fromUri(url)
+                val mediaItem = buildExoMediaItem(source)
                 exoPlayer.setMediaItem(mediaItem)
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
@@ -194,15 +221,10 @@ fun PlayerScreen(
         val currentPosition = exoPlayer.currentPosition
         val wasPlaying = exoPlayer.isPlaying
         selectedSourceIndex = newIndex
-        val newSource = activeSources.getOrNull(newIndex)
-        val newUrl = newSource?.url ?: return
-        newSource.headers.let { headers ->
-            if (headers.isNotEmpty()) {
-                httpDataSourceFactory.setDefaultRequestProperties(headers)
-            }
-        }
+        val newSource = activeSources.getOrNull(newIndex) ?: return
+        prepareHeadersForSource(newSource)
         try {
-            val newMediaItem = ExoMediaItem.fromUri(newUrl)
+            val newMediaItem = buildExoMediaItem(newSource)
             exoPlayer.setMediaItem(newMediaItem)
             exoPlayer.prepare()
             exoPlayer.seekTo(currentPosition)
@@ -224,7 +246,12 @@ fun PlayerScreen(
 
             override fun onPlayerError(error: PlaybackException) {
                 isBuffering = false
-                playbackError = error.localizedMessage ?: "Failed to stream video from server"
+                if (selectedSourceIndex + 1 < activeSources.size) {
+                    // Try next working stream fallback
+                    switchQuality(selectedSourceIndex + 1)
+                } else {
+                    playbackError = error.localizedMessage ?: "Failed to stream video from server"
+                }
             }
         }
         exoPlayer.addListener(listener)

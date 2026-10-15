@@ -22,8 +22,9 @@ data class ExtractorLink(
             serverName = "$source • $name",
             quality = quality,
             url = url,
-            isM3u8 = isM3u8,
-            headers = mergedHeaders
+            referer = referer,
+            headers = mergedHeaders,
+            isM3u8 = isM3u8
         )
     }
 }

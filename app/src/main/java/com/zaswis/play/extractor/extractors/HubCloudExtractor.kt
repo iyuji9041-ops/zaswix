@@ -37,8 +37,9 @@ class HubCloudExtractor : ExtractorApi() {
 
     override suspend fun getUrl(url: String, referer: String?): List<ExtractorLink> {
         val links = mutableListOf<ExtractorLink>()
+        val effectiveReferer = referer ?: url
         try {
-            val html = fetchHtml(url, referer) ?: return emptyList()
+            val html = fetchHtml(url, effectiveReferer) ?: return emptyList()
 
             // 1. Double atob redirect unpacker
             var targetPageUrl = extractDoubleAtob(html)
@@ -60,25 +61,37 @@ class HubCloudExtractor : ExtractorApi() {
             for (match in hrefPattern.findAll(targetHtml)) {
                 val foundUrl = match.groupValues[1]
                 if (foundUrl.contains("cloudflarestorage.com") || foundUrl.contains(".r2.") ||
-                    foundUrl.contains(".mkv") || foundUrl.contains(".mp4") || foundUrl.contains("s3.aws")) {
+                    foundUrl.contains(".mkv") || foundUrl.contains(".mp4") || foundUrl.contains(".m3u8") || foundUrl.contains("s3.aws")) {
+                    val isM3u8 = foundUrl.contains(".m3u8", ignoreCase = true)
                     links.add(
                         ExtractorLink(
                             source = "HubCloud R2",
-                            name = "Fast Cloud Stream",
+                            name = if (isM3u8) "HLS Adaptive Stream" else "Fast Cloud Stream",
                             url = foundUrl,
                             quality = "1080p",
-                            referer = url
+                            referer = effectiveReferer,
+                            isM3u8 = isM3u8,
+                            headers = mapOf(
+                                "Referer" to effectiveReferer,
+                                "User-Agent" to defaultUserAgent
+                            )
                         )
                     )
                 } else if (foundUrl.contains("pixeldrain")) {
                     val pxlId = foundUrl.substringAfterLast("/")
+                    val directPxl = "https://pixeldrain.com/api/file/$pxlId?download"
                     links.add(
                         ExtractorLink(
                             source = "HubCloud Pixel",
                             name = "High Speed Mirror",
-                            url = "https://pixeldrain.com/api/file/$pxlId?download",
+                            url = directPxl,
                             quality = "1080p",
-                            referer = "https://pixeldrain.com/"
+                            referer = "https://pixeldrain.com/",
+                            isM3u8 = false,
+                            headers = mapOf(
+                                "Referer" to "https://pixeldrain.com/",
+                                "User-Agent" to defaultUserAgent
+                            )
                         )
                     )
                 }
@@ -87,13 +100,19 @@ class HubCloudExtractor : ExtractorApi() {
             // 3. Check for embedded var pxl
             extractPxlUrl(targetHtml)?.let { pxlLink ->
                 val pxlId = pxlLink.substringAfterLast("/")
+                val directPxl = "https://pixeldrain.com/api/file/$pxlId?download"
                 links.add(
                     ExtractorLink(
                         source = "HubCloud Pixel",
                         name = "Direct CDN",
-                        url = "https://pixeldrain.com/api/file/$pxlId?download",
+                        url = directPxl,
                         quality = "1080p",
-                        referer = "https://pixeldrain.com/"
+                        referer = "https://pixeldrain.com/",
+                        isM3u8 = false,
+                        headers = mapOf(
+                            "Referer" to "https://pixeldrain.com/",
+                            "User-Agent" to defaultUserAgent
+                        )
                     )
                 )
             }
