@@ -6,6 +6,7 @@ import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -43,6 +46,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +73,9 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.zaswis.play.data.model.MediaItem
 import com.zaswis.play.data.repository.MediaRepository
+import com.zaswis.play.extractor.ResolvedStream
+import com.zaswis.play.extractor.ServerOption
+import com.zaswis.play.extractor.ZaswixDetailsExtractor
 import com.zaswis.play.ui.components.ZaswixIcons
 import com.zaswis.play.ui.theme.NetflixCardBg
 import com.zaswis.play.ui.theme.NetflixDarkGrey
@@ -80,8 +87,390 @@ import com.zaswis.play.ui.theme.NetflixWhite
 @Composable
 fun PlayerScreen(
     item: MediaItem,
+    servers: List<ServerOption> = emptyList(),
+    initialServer: ServerOption? = null,
     onBackClick: () -> Unit,
     mediaRepository: MediaRepository = remember { MediaRepository() },
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val activity = context as? Activity
+
+    // Immersive Mode: Hide system status bar and navigation bar while watching
+    DisposableEffect(Unit) {
+        val window = activity?.window
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        onDispose {
+            val window = activity?.window
+            if (window != null) {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    var availableServers by remember(servers) { mutableStateOf(servers) }
+    var currentServerOption by remember(initialServer, servers) {
+        mutableStateOf(initialServer ?: servers.firstOrNull())
+    }
+
+    // Auto-resolve servers if opened from a multimovies or toonstream item with no servers passed
+    LaunchedEffect(item.id) {
+        if (availableServers.isEmpty() && (item.pageUrl.contains("multimovies", ignoreCase = true) || item.pageUrl.contains("toonstream", ignoreCase = true))) {
+            val payload = mediaRepository.loadMediaDetails(item.pageUrl, item.providerName)
+            if (payload != null && payload.servers.isNotEmpty()) {
+                availableServers = payload.servers
+                currentServerOption = payload.servers.firstOrNull()
+            }
+        }
+    }
+
+    if (currentServerOption != null || availableServers.isNotEmpty()) {
+        HybridServerPlayerView(
+            item = item,
+            availableServers = availableServers,
+            currentServerOption = currentServerOption,
+            onSelectServer = { currentServerOption = it },
+            onBackClick = onBackClick,
+            modifier = modifier
+        )
+        return
+    }
+
+    NativeExoPlayerView(
+        item = item,
+        mediaRepository = mediaRepository,
+        onBackClick = onBackClick,
+        modifier = modifier
+    )
+}
+
+@Composable
+fun HybridServerPlayerView(
+    item: MediaItem,
+    availableServers: List<ServerOption>,
+    currentServerOption: ServerOption?,
+    onSelectServer: (ServerOption) -> Unit,
+    onBackClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val activeServer = currentServerOption ?: availableServers.firstOrNull()
+    var resolvedStream by remember { mutableStateOf<ResolvedStream?>(null) }
+    var isResolving by remember { mutableStateOf(false) }
+    var resolveError by remember { mutableStateOf<String?>(null) }
+    var isControlsVisible by remember { mutableStateOf(true) }
+
+    LaunchedEffect(activeServer) {
+        val srv = activeServer ?: return@LaunchedEffect
+        isResolving = true
+        resolveError = null
+        try {
+            val stream = ZaswixDetailsExtractor.resolveServerToStream(srv)
+            resolvedStream = stream
+        } catch (e: Exception) {
+            resolveError = e.localizedMessage ?: "Failed to resolve stream for ${srv.serverName}"
+        } finally {
+            isResolving = false
+        }
+    }
+
+    if (activeServer == null) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("No stream server available", color = NetflixWhite)
+        }
+        return
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable { isControlsVisible = !isControlsVisible }
+    ) {
+        // 1. Hybrid Stream Player Engine
+        if (resolvedStream != null) {
+            HybridStreamPlayer(
+                stream = resolvedStream!!,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // 2. Resolving Loader Overlay
+        if (isResolving) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = if (resolvedStream == null) 1f else 0.7f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = NetflixRed,
+                        modifier = Modifier.size(54.dp),
+                        strokeWidth = 3.dp
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Text(
+                        text = "Resolving ${activeServer.serverName}...",
+                        color = NetflixWhite,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Extracting direct video or configuring ad-free player",
+                        color = NetflixLightGrey,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+
+        // 3. Error Overlay
+        if (resolveError != null && resolvedStream == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.85f)
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = NetflixCardBg),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Stream Connection Issue",
+                            color = NetflixRed,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = resolveError ?: "Failed to connect to ${activeServer.serverName}",
+                            color = NetflixLightGrey,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = onBackClick,
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixDarkGrey),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("Back", color = NetflixWhite)
+                            }
+                            if (availableServers.size > 1) {
+                                Button(
+                                    onClick = {
+                                        val nextIdx = (availableServers.indexOf(activeServer) + 1) % availableServers.size
+                                        onSelectServer(availableServers[nextIdx])
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text("Next Server", color = NetflixWhite, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Top Overlay Bar
+        if (isControlsVisible) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.85f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onBackClick,
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+                ) {
+                    Icon(
+                        imageVector = ZaswixIcons.ArrowBack,
+                        contentDescription = "Back",
+                        tint = NetflixWhite
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = item.title,
+                        color = NetflixWhite,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = "${item.providerName} • ${activeServer.serverName}",
+                        color = NetflixLightGrey,
+                        fontSize = 12.sp,
+                        maxLines = 1
+                    )
+                }
+
+                if (resolvedStream != null) {
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                if (resolvedStream?.isDirectStream == true) Color(0xFF46D369).copy(alpha = 0.25f)
+                                else Color(0xFFFF9800).copy(alpha = 0.25f),
+                                RoundedCornerShape(6.dp)
+                            )
+                            .border(
+                                1.dp,
+                                if (resolvedStream?.isDirectStream == true) Color(0xFF46D369).copy(alpha = 0.6f)
+                                else Color(0xFFFF9800).copy(alpha = 0.6f),
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (resolvedStream?.isDirectStream == true) "EXOPLAYER" else "AD-BLOCKED",
+                            color = if (resolvedStream?.isDirectStream == true) Color(0xFF46D369) else Color(0xFFFFB300),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        // 5. Clean Glassmorphic Server Switcher Bar
+        if (isControlsVisible && availableServers.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 20.dp, start = 16.dp, end = 16.dp)
+                    .background(Color(0xFF141414).copy(alpha = 0.88f), RoundedCornerShape(16.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "AVAILABLE SERVERS",
+                            color = NetflixRed,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "${availableServers.size} Sources Ready",
+                            color = NetflixLightGrey,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        items(availableServers) { srv ->
+                            val isSelected = srv.id == activeServer.id && srv.embedUrl == activeServer.embedUrl
+                            Surface(
+                                onClick = {
+                                    if (!isSelected) {
+                                        onSelectServer(srv)
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSelected) NetflixRed else NetflixDarkGrey.copy(alpha = 0.85f),
+                                border = if (isSelected) BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)) else BorderStroke(0.5.dp, Color.White.copy(alpha = 0.1f)),
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = ZaswixIcons.Check,
+                                            contentDescription = "Selected",
+                                            tint = NetflixWhite,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = srv.serverName,
+                                        color = NetflixWhite,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                    if (srv.quality.isNotEmpty()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .background(
+                                                    if (isSelected) Color.Black.copy(alpha = 0.35f) else NetflixCardBg,
+                                                    RoundedCornerShape(3.dp)
+                                                )
+                                                .padding(horizontal = 5.dp, vertical = 1.dp)
+                                        ) {
+                                            Text(
+                                                text = srv.quality,
+                                                color = NetflixWhite,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+fun NativeExoPlayerView(
+    item: MediaItem,
+    mediaRepository: MediaRepository,
+    onBackClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current

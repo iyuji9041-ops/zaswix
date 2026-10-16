@@ -21,10 +21,17 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -33,15 +40,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import coil.compose.AsyncImage
 import com.zaswis.play.data.model.MediaItem
 import com.zaswis.play.data.model.StreamSource
 import com.zaswis.play.data.repository.MediaRepository
+import com.zaswis.play.extractor.EpisodeItem
+import com.zaswis.play.extractor.MediaDetailsPayload
+import com.zaswis.play.extractor.ServerOption
 import com.zaswis.play.ui.components.ZaswixIcons
 import com.zaswis.play.ui.theme.NetflixBlack
 import com.zaswis.play.ui.theme.NetflixCardBg
@@ -49,23 +54,40 @@ import com.zaswis.play.ui.theme.NetflixDarkGrey
 import com.zaswis.play.ui.theme.NetflixLightGrey
 import com.zaswis.play.ui.theme.NetflixRed
 import com.zaswis.play.ui.theme.NetflixWhite
-import coil.compose.AsyncImage
+import kotlinx.coroutines.launch
 
 @Composable
 fun DetailsScreen(
     item: MediaItem,
     mediaRepository: MediaRepository = remember { MediaRepository() },
     onBackClick: () -> Unit,
-    onPlayClick: (MediaItem) -> Unit,
+    onPlayClick: (item: MediaItem, servers: List<ServerOption>, selectedServer: ServerOption?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
     var currentStreams by remember(item.id) { mutableStateOf(item.streamSources) }
     var isAutoResolving by remember(item.id) { mutableStateOf(false) }
 
+    var detailsPayload by remember(item.id) { mutableStateOf<MediaDetailsPayload?>(null) }
+    var isLoadingDetails by remember(item.id) { mutableStateOf(false) }
+    var loadingEpisodeUrl by remember(item.id) { mutableStateOf<String?>(null) }
+
     // Automatic Background Link Extraction (Cloudstream style: auto-scrape and resolve)
     LaunchedEffect(item.id) {
-        if (item.embedUrls.isNotEmpty() || item.pageUrl.isNotEmpty()) {
+        val isDetailsProvider = item.pageUrl.contains("multimovies", ignoreCase = true) ||
+                item.providerName.contains("multimovies", ignoreCase = true) ||
+                item.pageUrl.contains("toonstream", ignoreCase = true) ||
+                item.providerName.contains("toonstream", ignoreCase = true)
+
+        if (isDetailsProvider && item.pageUrl.isNotEmpty()) {
+            isLoadingDetails = true
+            val payload = mediaRepository.loadMediaDetails(item.pageUrl, item.providerName)
+            if (payload != null) {
+                detailsPayload = payload
+            }
+            isLoadingDetails = false
+        } else if (item.embedUrls.isNotEmpty() || item.pageUrl.isNotEmpty()) {
             isAutoResolving = true
             val resolved = mediaRepository.autoResolveMediaStreams(item)
             if (resolved.isNotEmpty()) {
@@ -74,6 +96,16 @@ fun DetailsScreen(
             isAutoResolving = false
         }
     }
+
+    val displayTitle = detailsPayload?.title?.ifEmpty { item.title } ?: item.title
+    val displayOverview = detailsPayload?.synopsis?.ifEmpty { item.overview } ?: item.overview
+    val displayGenres = if (!detailsPayload?.genres.isNullOrEmpty()) detailsPayload!!.genres else item.genres
+    val displayRating = detailsPayload?.rating?.ifEmpty { item.rating } ?: item.rating
+    val displayYear = detailsPayload?.year?.ifEmpty { item.year } ?: item.year
+    val displayBackdrop = detailsPayload?.backdropUrl?.ifEmpty { item.backdropUrl }?.ifEmpty { item.posterUrl }
+        ?: item.backdropUrl.ifEmpty { item.posterUrl }
+    val extractedEpisodes = detailsPayload?.episodes.orEmpty()
+    val extractedServers = detailsPayload?.servers.orEmpty()
 
     Box(
         modifier = modifier
@@ -92,8 +124,8 @@ fun DetailsScreen(
                     .height(280.dp)
             ) {
                 AsyncImage(
-                    model = item.backdropUrl.ifEmpty { item.posterUrl },
-                    contentDescription = item.title,
+                    model = displayBackdrop,
+                    contentDescription = displayTitle,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
@@ -135,7 +167,7 @@ fun DetailsScreen(
                     .padding(horizontal = 16.dp)
             ) {
                 Text(
-                    text = item.title,
+                    text = displayTitle,
                     color = NetflixWhite,
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold
@@ -148,13 +180,13 @@ fun DetailsScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "${item.rating} Rating",
+                        text = "$displayRating Rating",
                         color = Color(0xFF46D369),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = item.year,
+                        text = displayYear,
                         color = NetflixLightGrey,
                         fontSize = 13.sp
                     )
@@ -182,7 +214,23 @@ fun DetailsScreen(
                 // Play Button
                 Button(
                     onClick = {
-                        if (item.episodes.isNotEmpty()) {
+                        if (extractedServers.isNotEmpty()) {
+                            onPlayClick(item, extractedServers, extractedServers.firstOrNull())
+                        } else if (extractedEpisodes.isNotEmpty()) {
+                            val ep1 = extractedEpisodes.first()
+                            coroutineScope.launch {
+                                loadingEpisodeUrl = ep1.url
+                                val epPayload = mediaRepository.loadMediaDetails(ep1.url, item.providerName)
+                                loadingEpisodeUrl = null
+                                val epServers = epPayload?.servers.orEmpty()
+                                val epItem = item.copy(
+                                    id = "${item.id}_s${ep1.season}_e${ep1.episode}",
+                                    title = "${item.title} - S${ep1.season}E${ep1.episode}: ${ep1.title}",
+                                    pageUrl = ep1.url
+                                )
+                                onPlayClick(epItem, epServers, epServers.firstOrNull())
+                            }
+                        } else if (item.episodes.isNotEmpty()) {
                             val ep1 = item.episodes.first()
                             onPlayClick(
                                 item.copy(
@@ -191,10 +239,12 @@ fun DetailsScreen(
                                     streamSources = ep1.streamSources,
                                     embedUrls = if (ep1.embedUrls.isNotEmpty()) ep1.embedUrls else item.embedUrls,
                                     pageUrl = if (ep1.pageUrl.isNotEmpty()) ep1.pageUrl else item.pageUrl
-                                )
+                                ),
+                                emptyList(),
+                                null
                             )
                         } else {
-                            onPlayClick(item.copy(streamSources = currentStreams))
+                            onPlayClick(item.copy(streamSources = currentStreams), emptyList(), null)
                         }
                     },
                     modifier = Modifier
@@ -253,7 +303,7 @@ fun DetailsScreen(
 
                 // Overview Synopsis
                 Text(
-                    text = item.overview,
+                    text = displayOverview,
                     color = NetflixWhite,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -262,23 +312,194 @@ fun DetailsScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Provider and Category tags
-                Text(
-                    text = "Source Provider: ${item.providerName}",
-                    color = NetflixRed,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Source Provider: ${item.providerName}",
+                        color = NetflixRed,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    if (isLoadingDetails) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                color = NetflixRed,
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Fetching Servers...",
+                                color = NetflixLightGrey,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Genres: ${item.genres.joinToString(", ")}",
+                    text = "Genres: ${displayGenres.joinToString(", ")}",
                     color = NetflixLightGrey,
                     fontSize = 12.sp
                 )
 
                 // Episodes Section (for series / anime)
-                if (item.episodes.isNotEmpty()) {
+                if (extractedEpisodes.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Episodes (${extractedEpisodes.size})",
+                            color = NetflixWhite,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = item.durationOrSeasons,
+                            color = NetflixLightGrey,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    extractedEpisodes.forEach { episode ->
+                        val isEpLoading = loadingEpisodeUrl == episode.url
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 5.dp)
+                                .clickable {
+                                    coroutineScope.launch {
+                                        loadingEpisodeUrl = episode.url
+                                        val epPayload = mediaRepository.loadMediaDetails(episode.url, item.providerName)
+                                        loadingEpisodeUrl = null
+                                        val epServers = epPayload?.servers.orEmpty()
+                                        val epItem = item.copy(
+                                            id = "${item.id}_s${episode.season}_e${episode.episode}",
+                                            title = "${item.title} - S${episode.season}E${episode.episode}: ${episode.title}",
+                                            pageUrl = episode.url
+                                        )
+                                        onPlayClick(epItem, epServers, epServers.firstOrNull())
+                                    }
+                                },
+                            colors = CardDefaults.cardColors(containerColor = NetflixDarkGrey),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(width = 110.dp, height = 65.dp)
+                                        .background(NetflixCardBg, RoundedCornerShape(6.dp))
+                                ) {
+                                    AsyncImage(
+                                        model = episode.thumbnailUrl.ifEmpty { displayBackdrop },
+                                        contentDescription = episode.title,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black.copy(alpha = 0.35f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isEpLoading) {
+                                            CircularProgressIndicator(
+                                                color = NetflixRed,
+                                                modifier = Modifier.size(24.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = ZaswixIcons.PlayArrow,
+                                                contentDescription = "Play Episode",
+                                                tint = NetflixWhite,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "S${episode.season}E${episode.episode} • ${episode.title}",
+                                        color = NetflixWhite,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                    if (episode.runtime.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = episode.runtime,
+                                            color = NetflixLightGrey,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    if (episode.description.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = episode.description,
+                                            color = NetflixLightGrey,
+                                            fontSize = 11.sp,
+                                            maxLines = 2
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            loadingEpisodeUrl = episode.url
+                                            val epPayload = mediaRepository.loadMediaDetails(episode.url, item.providerName)
+                                            loadingEpisodeUrl = null
+                                            val epServers = epPayload?.servers.orEmpty()
+                                            val epItem = item.copy(
+                                                id = "${item.id}_s${episode.season}_e${episode.episode}",
+                                                title = "${item.title} - S${episode.season}E${episode.episode}: ${episode.title}",
+                                                pageUrl = episode.url
+                                            )
+                                            onPlayClick(epItem, epServers, epServers.firstOrNull())
+                                        }
+                                    }
+                                ) {
+                                    if (isEpLoading) {
+                                        CircularProgressIndicator(
+                                            color = NetflixRed,
+                                            modifier = Modifier.size(22.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = ZaswixIcons.PlayArrow,
+                                            contentDescription = "Play",
+                                            tint = NetflixRed,
+                                            modifier = Modifier.size(26.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (item.episodes.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(24.dp))
 
                     Row(
@@ -314,7 +535,9 @@ fun DetailsScreen(
                                             streamSources = episode.streamSources,
                                             embedUrls = if (episode.embedUrls.isNotEmpty()) episode.embedUrls else item.embedUrls,
                                             pageUrl = if (episode.pageUrl.isNotEmpty()) episode.pageUrl else item.pageUrl
-                                        )
+                                        ),
+                                        emptyList(),
+                                        null
                                     )
                                 },
                             colors = CardDefaults.cardColors(containerColor = NetflixDarkGrey),
@@ -332,7 +555,7 @@ fun DetailsScreen(
                                         .background(NetflixCardBg, RoundedCornerShape(6.dp))
                                 ) {
                                     AsyncImage(
-                                        model = episode.thumbnail.ifEmpty { item.backdropUrl.ifEmpty { item.posterUrl } },
+                                        model = episode.thumbnail.ifEmpty { displayBackdrop },
                                         contentDescription = episode.title,
                                         modifier = Modifier.fillMaxSize(),
                                         contentScale = ContentScale.Crop
@@ -376,7 +599,9 @@ fun DetailsScreen(
                                             item.copy(
                                                 title = "${item.title} - Ep. ${episode.episodeNumber}: ${episode.title}",
                                                 streamSources = episode.streamSources.ifEmpty { currentStreams }
-                                            )
+                                            ),
+                                            emptyList(),
+                                            null
                                         )
                                     }
                                 ) {
@@ -395,40 +620,26 @@ fun DetailsScreen(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // Available Stream Servers
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "Available Stream Servers (${currentStreams.size})",
-                            color = NetflixWhite,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Auto-resolved via Cloudstream Engine",
-                            color = NetflixLightGrey,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    if (isAutoResolving) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(
-                                color = NetflixRed,
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
+                if (extractedServers.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
                             Text(
-                                text = "Auto-Extracting...",
+                                text = "Available Stream Servers (${extractedServers.size})",
+                                color = NetflixWhite,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Direct & Embed Providers (Ruby, Cineverse, Vidrift...)",
                                 color = NetflixLightGrey,
                                 fontSize = 11.sp
                             )
                         }
-                    } else {
+
                         Box(
                             modifier = Modifier
                                 .background(Color(0xFF46D369).copy(alpha = 0.2f), RoundedCornerShape(4.dp))
@@ -442,30 +653,27 @@ fun DetailsScreen(
                             )
                         }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                currentStreams.forEach { source ->
-                    val isLiveExtracted = source.headers.isNotEmpty() || source.serverName.contains("•")
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .background(NetflixDarkGrey, RoundedCornerShape(8.dp))
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = source.serverName,
-                                    color = NetflixWhite,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                if (isLiveExtracted) {
+                    extractedServers.forEach { server ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .background(NetflixDarkGrey, RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = server.serverName,
+                                        color = NetflixWhite,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Box(
                                         modifier = Modifier
@@ -480,22 +688,126 @@ fun DetailsScreen(
                                         )
                                     }
                                 }
+                                Text(
+                                    text = "Quality: ${server.quality} • Fast Cloud Server",
+                                    color = NetflixLightGrey,
+                                    fontSize = 12.sp
+                                )
                             }
+                            Button(
+                                onClick = {
+                                    onPlayClick(item, extractedServers, server)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
                             Text(
-                                text = "Quality: ${source.quality}${if (source.isM3u8) " • HLS Stream" else " • Direct Video"}",
+                                text = "Available Stream Servers (${currentStreams.size})",
+                                color = NetflixWhite,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Auto-resolved via Cloudstream Engine",
                                 color = NetflixLightGrey,
-                                fontSize = 12.sp
+                                fontSize = 11.sp
                             )
                         }
-                        Button(
-                            onClick = {
-                                val reordered = listOf(source) + currentStreams.filter { it != source }
-                                onPlayClick(item.copy(streamSources = reordered))
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
-                            shape = RoundedCornerShape(4.dp)
+
+                        if (isAutoResolving) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(
+                                    color = NetflixRed,
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Auto-Extracting...",
+                                    color = NetflixLightGrey,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .background(Color(0xFF46D369).copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "READY TO STREAM",
+                                    color = Color(0xFF46D369),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    currentStreams.forEach { source ->
+                        val isLiveExtracted = source.headers.isNotEmpty() || source.serverName.contains("•")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .background(NetflixDarkGrey, RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = source.serverName,
+                                        color = NetflixWhite,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    if (isLiveExtracted) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .background(Color(0xFF46D369).copy(alpha = 0.2f), RoundedCornerShape(3.dp))
+                                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "LIVE EXTRACTED",
+                                                color = Color(0xFF46D369),
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    text = "Quality: ${source.quality}${if (source.isM3u8) " • HLS Stream" else " • Direct Video"}",
+                                    color = NetflixLightGrey,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    val reordered = listOf(source) + currentStreams.filter { it != source }
+                                    onPlayClick(item.copy(streamSources = reordered), emptyList(), null)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                            }
                         }
                     }
                 }

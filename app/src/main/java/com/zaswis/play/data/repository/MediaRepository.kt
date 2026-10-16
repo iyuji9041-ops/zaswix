@@ -10,6 +10,9 @@ import com.zaswis.play.extractor.ExtractorRegistry
 import com.zaswis.play.extractor.HomePagePayload
 import com.zaswis.play.extractor.ScrapedCategoryRow
 import com.zaswis.play.extractor.ScrapedMediaItem
+import com.zaswis.play.extractor.MediaDetailsPayload
+import com.zaswis.play.extractor.ServerOption
+import com.zaswis.play.extractor.ZaswixDetailsExtractor
 import com.zaswis.play.extractor.ZaswixMultiScraper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -69,6 +72,25 @@ class MediaRepository {
             CloudstreamProvider.search(query)
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    /**
+     * Resolves rich media details, server options, and episode lists using ZaswixDetailsExtractor
+     * for MultiMovies and ToonStream.
+     */
+    suspend fun loadMediaDetails(url: String, providerName: String = ""): MediaDetailsPayload? = withContext(Dispatchers.IO) {
+        if (url.isBlank()) return@withContext null
+        try {
+            when {
+                url.contains("multimovies", ignoreCase = true) || providerName.contains("multimovies", ignoreCase = true) ->
+                    ZaswixDetailsExtractor.loadMultiMoviesDetails(url)
+                url.contains("toonstream", ignoreCase = true) || providerName.contains("toonstream", ignoreCase = true) ->
+                    ZaswixDetailsExtractor.loadToonStreamDetails(url)
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

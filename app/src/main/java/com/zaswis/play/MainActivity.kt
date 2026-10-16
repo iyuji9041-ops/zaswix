@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.zaswis.play.data.model.MediaItem
 import com.zaswis.play.data.repository.MediaRepository
+import com.zaswis.play.extractor.ServerOption
 import com.zaswis.play.plugin.PluginManager
 import com.zaswis.play.ui.components.NetflixBottomBar
 import com.zaswis.play.ui.components.Screen
@@ -69,6 +70,8 @@ fun ZaswixApp(
     var currentRoute by remember { mutableStateOf(Screen.Home.route) }
     var selectedItem by remember { mutableStateOf<MediaItem?>(null) }
     var playingItem by remember { mutableStateOf<MediaItem?>(null) }
+    var playingServers by remember { mutableStateOf<List<ServerOption>>(emptyList()) }
+    var playingInitialServer by remember { mutableStateOf<ServerOption?>(null) }
 
     // If player is open, render in-app fullscreen player
     if (playingItem != null) {
@@ -76,12 +79,18 @@ fun ZaswixApp(
         BackHandler {
             onOrientationChange(false)
             playingItem = null
+            playingServers = emptyList()
+            playingInitialServer = null
         }
         PlayerScreen(
             item = playingItem!!,
+            servers = playingServers,
+            initialServer = playingInitialServer,
             onBackClick = {
                 onOrientationChange(false)
                 playingItem = null
+                playingServers = emptyList()
+                playingInitialServer = null
             }
         )
         return
@@ -98,7 +107,11 @@ fun ZaswixApp(
             item = selectedItem!!,
             mediaRepository = mediaRepository,
             onBackClick = { selectedItem = null },
-            onPlayClick = { item -> playingItem = item }
+            onPlayClick = { item, servers, initialServer ->
+                playingItem = item
+                playingServers = servers
+                playingInitialServer = initialServer
+            }
         )
         return
     }
@@ -125,7 +138,11 @@ fun ZaswixApp(
                         mediaRepository = mediaRepository,
                         pluginManager = pluginManager,
                         onMediaClick = { selectedItem = it },
-                        onPlayClick = { item -> playingItem = item },
+                        onPlayClick = { item ->
+                            playingItem = item
+                            playingServers = emptyList()
+                            playingInitialServer = null
+                        },
                         onSearchClick = { currentRoute = Screen.Search.route },
                         onPluginsClick = { currentRoute = Screen.Plugins.route }
                     )
