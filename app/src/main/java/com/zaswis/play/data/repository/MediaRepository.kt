@@ -14,6 +14,8 @@ import com.zaswis.play.extractor.MediaDetailsPayload
 import com.zaswis.play.extractor.ServerOption
 import com.zaswis.play.extractor.ZaswixDetailsExtractor
 import com.zaswis.play.extractor.ZaswixMultiScraper
+import com.zaswis.play.plugin.PluginManager
+import com.zaswis.play.plugin.toModelMediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -76,12 +78,60 @@ class MediaRepository {
     }
 
     /**
-     * Resolves rich media details, server options, and episode lists using ZaswixDetailsExtractor
-     * for MultiMovies and ToonStream.
+     * Dynamically searches across all active plugins in PluginManager.loadedPlugins
+     */
+    suspend fun searchLivePlugins(query: String): List<MediaItem> = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val fromPlugins = synchronized(PluginManager.loadedPlugins) {
+                PluginManager.loadedPlugins.toList()
+            }.map { plugin ->
+                async {
+                    try {
+                        plugin.search(query).map { it.toModelMediaItem(plugin.providerName) }
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+            }.awaitAll().flatten()
+
+            if (fromPlugins.isNotEmpty()) fromPlugins else searchLiveVegaMovies(query)
+        }
+    }
+
+    /**
+     * Resolves rich media details dynamically using loaded plugins (PluginManager.loadedPlugins)
      */
     suspend fun loadMediaDetails(url: String, providerName: String = ""): MediaDetailsPayload? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
         try {
+            // 1. Query dynamically loaded plugins in PluginManager
+            val matchingPlugin = synchronized(PluginManager.loadedPlugins) {
+                PluginManager.loadedPlugins.find { plugin ->
+                    plugin.providerName.equals(providerName, ignoreCase = true) ||
+                    url.contains(plugin.providerName.lowercase().replace("\\s+".toRegex(), ""), ignoreCase = true)
+                } ?: PluginManager.loadedPlugins.firstOrNull { plugin ->
+                    url.contains(plugin.providerName.take(4), ignoreCase = true)
+                }
+            }
+
+            if (matchingPlugin != null) {
+                val details = matchingPlugin.getDetails(url)
+                if (details.servers.isNotEmpty() || details.episodes.isNotEmpty() || details.synopsis.isNotEmpty()) {
+                    return@withContext MediaDetailsPayload(
+                        title = details.title,
+                        posterUrl = "",
+                        backdropUrl = "",
+                        synopsis = details.synopsis,
+                        rating = details.rating,
+                        year = "",
+                        genres = details.genres,
+                        servers = details.servers,
+                        episodes = details.episodes
+                    )
+                }
+            }
+
+            // 2. Fallback to built-in extractors
             when {
                 url.contains("multimovies", ignoreCase = true) || providerName.contains("multimovies", ignoreCase = true) ->
                     ZaswixDetailsExtractor.loadMultiMoviesDetails(url)
@@ -95,10 +145,19 @@ class MediaRepository {
     }
 
     /**
-     * StateFlow exposing live heroBannerItems combining top featured hero slides
+     * StateFlow exposing live heroBannerItems combining top featured hero slides.
+     * Safely initialized to prevent Android startup crashes.
      */
-    private val _heroBannerItems = MutableStateFlow<List<MediaItem>>(getDefaultHeroBannerItems())
+    private val _heroBannerItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val heroBannerItems: StateFlow<List<MediaItem>> = _heroBannerItems.asStateFlow()
+
+    init {
+        try {
+            _heroBannerItems.value = getDefaultHeroBannerItems()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     fun getHeroBannerItems(): List<MediaItem> = _heroBannerItems.value
 
@@ -118,10 +177,39 @@ class MediaRepository {
     }
 
     /**
-     * Concurrent scraper runner using async/awaitAll across all working sites
+     * Concurrent scraper runner: Dynamically executes all loaded plugins in PluginManager.loadedPlugins
      */
     suspend fun fetchScrapedHomePagePayload(pluginId: String = "all"): HomePagePayload = withContext(Dispatchers.IO) {
         coroutineScope {
+            val pluginsToRun = synchronized(PluginManager.loadedPlugins) {
+                if (pluginId == "all") {
+                    PluginManager.loadedPlugins.toList()
+                } else {
+                    PluginManager.loadedPlugins.filter { it.providerName.equals(pluginId, ignoreCase = true) }
+                }
+            }
+
+            // 1. Dynamic Plugin Execution
+            if (pluginsToRun.isNotEmpty()) {
+                val payloads = pluginsToRun.map { plugin ->
+                    async {
+                        try {
+                            plugin.getHomePage()
+                        } catch (e: Exception) {
+                            HomePagePayload(emptyList(), emptyList())
+                        }
+                    }
+                }.awaitAll()
+
+                val combinedHero = payloads.flatMap { it.heroBannerItems }.distinctBy { it.title }.take(10)
+                val combinedRows = payloads.flatMap { it.categoryRows }.filter { it.items.isNotEmpty() }
+
+                if (combinedHero.isNotEmpty() || combinedRows.isNotEmpty()) {
+                    return@coroutineScope HomePagePayload(combinedHero, combinedRows)
+                }
+            }
+
+            // 2. Fallback to built-in scrapers
             when (pluginId.lowercase()) {
                 "multimovies" -> ZaswixMultiScraper.scrapeMultiMovies()
                 "vegamovies" -> ZaswixMultiScraper.scrapeVegaMovies()
@@ -1381,38 +1469,40 @@ class MediaRepository {
         )
     )
 
-    val soloLevelingEpisodeLinks = listOf(
-        "https://vcloud.beer/qviclulvvpqaq0i", // Ep 1
-        "https://vcloud.beer/vjbsjlc_y_isvhe", // Ep 2
-        "https://vcloud.beer/ewbbsa5ablyva5k", // Ep 3
-        "https://vcloud.beer/ko0zs8zom1u_ya4", // Ep 4
-        "https://vcloud.beer/qrzmqbgrwssbcns", // Ep 5
-        "https://vcloud.beer/ty6uz0dy5y2tmoo", // Ep 6
-        "https://vcloud.beer/gb598mth8xahtyh", // Ep 7
-        "https://vcloud.beer/y68ykvdy28yyhhd", // Ep 8
-        "https://vcloud.beer/ouxexcuqqe_i7vb", // Ep 9
-        "https://vcloud.beer/o3u_iewj-fi3wa1", // Ep 10
-        "https://vcloud.beer/piqtqjjrkq2m_mt", // Ep 11
-        "https://vcloud.beer/vvvv9znp9kx_vtt"  // Ep 12
-    )
+    companion object {
+        val soloLevelingEpisodeLinks = listOf(
+            "https://vcloud.beer/qviclulvvpqaq0i", // Ep 1
+            "https://vcloud.beer/vjbsjlc_y_isvhe", // Ep 2
+            "https://vcloud.beer/ewbbsa5ablyva5k", // Ep 3
+            "https://vcloud.beer/ko0zs8zom1u_ya4", // Ep 4
+            "https://vcloud.beer/qrzmqbgrwssbcns", // Ep 5
+            "https://vcloud.beer/ty6uz0dy5y2tmoo", // Ep 6
+            "https://vcloud.beer/gb598mth8xahtyh", // Ep 7
+            "https://vcloud.beer/y68ykvdy28yyhhd", // Ep 8
+            "https://vcloud.beer/ouxexcuqqe_i7vb", // Ep 9
+            "https://vcloud.beer/o3u_iewj-fi3wa1", // Ep 10
+            "https://vcloud.beer/piqtqjjrkq2m_mt", // Ep 11
+            "https://vcloud.beer/vvvv9znp9kx_vtt"  // Ep 12
+        )
 
-    private fun createSampleEpisodes(
-        titlePrefix: String,
-        thumbUrl: String,
-        count: Int,
-        episodeLinks: List<String> = emptyList()
-    ): List<Episode> {
-        return (1..count).map { epNum ->
-            val link = episodeLinks.getOrNull(epNum - 1).orEmpty()
-            Episode(
-                episodeNumber = epNum,
-                title = "Episode $epNum: $titlePrefix",
-                thumbnail = thumbUrl,
-                duration = "24m",
-                streamSources = emptyList(),
-                embedUrls = if (link.isNotEmpty()) listOf(link) else emptyList(),
-                pageUrl = link
-            )
+        fun createSampleEpisodes(
+            titlePrefix: String,
+            thumbUrl: String,
+            count: Int,
+            episodeLinks: List<String>? = emptyList()
+        ): List<Episode> {
+            return (1..count).map { epNum ->
+                val link = episodeLinks?.getOrNull(epNum - 1).orEmpty()
+                Episode(
+                    episodeNumber = epNum,
+                    title = "Episode $epNum: $titlePrefix",
+                    thumbnail = thumbUrl,
+                    duration = "24m",
+                    streamSources = emptyList(),
+                    embedUrls = if (link.isNotEmpty()) listOf(link) else emptyList(),
+                    pageUrl = link
+                )
+            }
         }
     }
 }

@@ -53,7 +53,7 @@ fun SearchScreen(
 
     LaunchedEffect(searchQuery) {
         if (searchQuery.trim().length >= 3) {
-            val live = mediaRepository.searchLiveVegaMovies(searchQuery.trim())
+            val live = mediaRepository.searchLivePlugins(searchQuery.trim())
             liveResults = live
         } else {
             liveResults = emptyList()
