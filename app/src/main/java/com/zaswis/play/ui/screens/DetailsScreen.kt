@@ -1,7 +1,10 @@
 package com.zaswis.play.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.collectAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +67,12 @@ fun DetailsScreen(
     onPlayClick: (item: MediaItem, servers: List<ServerOption>, selectedServer: ServerOption?) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(context) {
+        mediaRepository.initDatabase(context)
+    }
+    val isInWatchlist by mediaRepository.isInWatchlist(item.id).collectAsState(initial = false)
+
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
     var currentStreams by remember(item.id) { mutableStateOf(item.streamSources) }
@@ -273,7 +282,45 @@ fun DetailsScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Download / Save Button
+                // Save / Add to My List Toggle Button
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            if (isInWatchlist) {
+                                mediaRepository.removeFromWatchlist(item.id)
+                            } else {
+                                mediaRepository.addToWatchlist(item)
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isInWatchlist) NetflixRed.copy(alpha = 0.2f) else NetflixCardBg,
+                        contentColor = if (isInWatchlist) NetflixRed else NetflixWhite
+                    ),
+                    shape = RoundedCornerShape(6.dp),
+                    border = if (isInWatchlist) BorderStroke(1.dp, NetflixRed) else null
+                ) {
+                    Icon(
+                        imageVector = if (isInWatchlist) ZaswixIcons.Bookmark else ZaswixIcons.Add,
+                        contentDescription = if (isInWatchlist) "In My List" else "Add to My List",
+                        tint = if (isInWatchlist) NetflixRed else NetflixWhite,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isInWatchlist) "✓ In My List" else "+ Add to My List",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isInWatchlist) NetflixRed else NetflixWhite
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Download Button
                 Button(
                     onClick = { },
                     modifier = Modifier

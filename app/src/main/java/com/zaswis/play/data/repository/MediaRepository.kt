@@ -16,6 +16,10 @@ import com.zaswis.play.extractor.ZaswixDetailsExtractor
 import com.zaswis.play.extractor.ZaswixMultiScraper
 import com.zaswis.play.plugin.PluginManager
 import com.zaswis.play.plugin.toModelMediaItem
+import android.content.Context
+import com.zaswis.play.data.local.AppDatabase
+import com.zaswis.play.data.local.MediaDao
+import com.zaswis.play.data.local.MediaEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -25,9 +29,42 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
-class MediaRepository {
+class MediaRepository(context: Context? = null) {
+
+    private var mediaDao: MediaDao? = context?.let { AppDatabase.getInstance(it).mediaDao() }
+
+    fun initDatabase(context: Context) {
+        if (mediaDao == null) {
+            mediaDao = AppDatabase.getInstance(context).mediaDao()
+        }
+    }
+
+    suspend fun addToWatchlist(item: MediaItem) {
+        withContext(Dispatchers.IO) {
+            mediaDao?.insert(MediaEntity.fromMediaItem(item))
+        }
+    }
+
+    suspend fun removeFromWatchlist(id: String) {
+        withContext(Dispatchers.IO) {
+            mediaDao?.deleteById(id)
+        }
+    }
+
+    fun getWatchlist(): Flow<List<MediaItem>> {
+        return mediaDao?.getWatchlist()?.map { entities ->
+            entities.map { it.toMediaItem() }
+        } ?: flow { emit(emptyList()) }
+    }
+
+    fun isItemInWatchlist(id: String): Flow<Boolean> {
+        return mediaDao?.isInWatchlist(id) ?: flow { emit(false) }
+    }
+
+    fun isInWatchlist(id: String): Flow<Boolean> = isItemInWatchlist(id)
 
     val extractorRegistry = ExtractorRegistry()
 

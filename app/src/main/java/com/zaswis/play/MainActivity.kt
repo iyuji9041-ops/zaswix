@@ -25,6 +25,7 @@ import com.zaswis.play.ui.components.NetflixBottomBar
 import com.zaswis.play.ui.components.Screen
 import com.zaswis.play.ui.screens.DetailsScreen
 import com.zaswis.play.ui.screens.HomeScreen
+import com.zaswis.play.ui.screens.MyListScreen
 import com.zaswis.play.ui.screens.PlayerScreen
 import com.zaswis.play.ui.screens.PluginsScreen
 import com.zaswis.play.ui.screens.SearchScreen
@@ -40,7 +41,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        mediaRepository = MediaRepository()
+        mediaRepository = MediaRepository(this)
         pluginManager = PluginManager(this)
 
         setContent {
@@ -159,9 +160,14 @@ fun ZaswixApp(
                     )
                 }
                 Screen.MyList.route -> {
-                    SearchScreen(
+                    MyListScreen(
                         mediaRepository = mediaRepository,
-                        onMediaClick = { selectedItem = it }
+                        onMediaClick = { selectedItem = it },
+                        onPlayClick = { item ->
+                            playingItem = item
+                            playingServers = emptyList()
+                            playingInitialServer = null
+                        }
                     )
                 }
             }
