@@ -75,6 +75,7 @@ fun PluginsScreen(
 
     var customRepoInput by remember { mutableStateOf("") }
     var syncMessage by remember { mutableStateOf("") }
+    var installingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val scope = rememberCoroutineScope()
 
     Box(
@@ -164,24 +165,54 @@ fun PluginsScreen(
                     available = availablePlugins,
                     isSyncing = isSyncing,
                     syncMessage = syncMessage,
+                    installingIds = installingIds,
                     customRepoInput = customRepoInput,
                     onCustomRepoChange = { customRepoInput = it },
                     onAddRepo = {
-                        pluginManager.addRepository(customRepoInput)
-                        customRepoInput = ""
-                    },
-                    onSync = {
-                        scope.launch {
-                            syncMessage = "Syncing with GitHub..."
-                            val res = pluginManager.syncRepositories()
-                            if (res.isSuccess) {
-                                syncMessage = "Successfully synced ${res.getOrNull()} extensions!"
-                            } else {
-                                syncMessage = "Sync notice: Local catalogue verified."
+                        val url = customRepoInput.trim()
+                        if (url.isNotEmpty()) {
+                            scope.launch {
+                                syncMessage = "Fetching plugins from repository..."
+                                val res = pluginManager.addRepository(url)
+                                if (res.isSuccess) {
+                                    customRepoInput = ""
+                                    syncMessage = "Loaded ${res.getOrNull()} extensions from repository!"
+                                } else {
+                                    syncMessage = "Failed: ${res.exceptionOrNull()?.message ?: "Invalid repository URL"}"
+                                }
                             }
                         }
                     },
-                    onInstall = { pluginManager.installPlugin(it) },
+                    onRemoveRepo = { pluginManager.removeRepositoryUrl(it) },
+                    onSync = {
+                        scope.launch {
+                            syncMessage = "Syncing repositories..."
+                            val res = pluginManager.syncRepositories()
+                            if (res.isSuccess) {
+                                val count = res.getOrNull() ?: 0
+                                syncMessage = if (count > 0) {
+                                    "Successfully synced $count extensions!"
+                                } else {
+                                    "No extensions found in configured repositories."
+                                }
+                            } else {
+                                syncMessage = "Sync failed: ${res.exceptionOrNull()?.message}"
+                            }
+                        }
+                    },
+                    onInstall = { plugin ->
+                        scope.launch {
+                            installingIds = installingIds + plugin.id
+                            syncMessage = "Downloading & loading ${plugin.name} APK..."
+                            val res = pluginManager.downloadAndInstallPlugin(plugin)
+                            installingIds = installingIds - plugin.id
+                            if (res.isSuccess) {
+                                syncMessage = "${plugin.name} extension successfully installed and loaded!"
+                            } else {
+                                syncMessage = "Error installing ${plugin.name}: ${res.exceptionOrNull()?.message}"
+                            }
+                        }
+                    },
                     onUninstall = { pluginManager.uninstallPlugin(it) }
                 )
             }
@@ -321,11 +352,13 @@ private fun ExploreRepositoriesView(
     available: List<PluginInfo>,
     isSyncing: Boolean,
     syncMessage: String,
+    installingIds: Set<String>,
     customRepoInput: String,
     onCustomRepoChange: (String) -> Unit,
     onAddRepo: () -> Unit,
+    onRemoveRepo: (String) -> Unit,
     onSync: () -> Unit,
-    onInstall: (String) -> Unit,
+    onInstall: (PluginInfo) -> Unit,
     onUninstall: (String) -> Unit
 ) {
     LazyColumn(
@@ -346,13 +379,13 @@ private fun ExploreRepositoriesView(
                     ) {
                         Column {
                             Text(
-                                text = "Official Scraper Repositories",
+                                text = "Provider Repositories",
                                 color = NetflixWhite,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Zaswix Official Providers Repository",
+                                text = "External plugins.json repository endpoints",
                                 color = NetflixLightGrey,
                                 fontSize = 11.sp
                             )
@@ -388,29 +421,50 @@ private fun ExploreRepositoriesView(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    repos.forEach { url ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(NetflixDarkGrey, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                imageVector = ZaswixIcons.Check,
-                                contentDescription = "Active",
-                                tint = Color(0xFF46D369),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = url,
-                                color = NetflixWhite,
-                                fontSize = 11.sp,
-                                maxLines = 1
-                            )
+                    if (repos.isEmpty()) {
+                        Text(
+                            text = "No repository endpoints added. Enter a plugins.json URL below.",
+                            color = NetflixLightGrey,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                    } else {
+                        repos.forEach { url ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(NetflixDarkGrey, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = ZaswixIcons.Check,
+                                    contentDescription = "Active",
+                                    tint = Color(0xFF46D369),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = url,
+                                    color = NetflixWhite,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = { onRemoveRepo(url) },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.Clear,
+                                        contentDescription = "Remove",
+                                        tint = NetflixLightGrey,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
@@ -423,7 +477,7 @@ private fun ExploreRepositoriesView(
                         OutlinedTextField(
                             value = customRepoInput,
                             onValueChange = onCustomRepoChange,
-                            placeholder = { Text("Add custom repo URL (e.g., https://.../repo.json)", fontSize = 12.sp, color = NetflixLightGrey) },
+                            placeholder = { Text("Paste plugins.json URL (e.g., https://.../plugins.json)", fontSize = 12.sp, color = NetflixLightGrey) },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -454,6 +508,46 @@ private fun ExploreRepositoriesView(
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold
             )
+        }
+
+        if (available.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = NetflixCardBg),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(28.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = ZaswixIcons.Extension,
+                                contentDescription = null,
+                                tint = NetflixLightGrey,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "0 Extensions Available",
+                                color = NetflixWhite,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Add a valid plugins.json repository URL in the text field above to discover and install provider extensions.",
+                                color = NetflixLightGrey,
+                                fontSize = 12.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Extension Items
@@ -521,6 +615,8 @@ private fun ExploreRepositoriesView(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
+                    val isInstalling = installingIds.contains(plugin.id)
+
                     if (plugin.isInstalled) {
                         Button(
                             onClick = { onUninstall(plugin.id) },
@@ -534,14 +630,25 @@ private fun ExploreRepositoriesView(
                         }
                     } else {
                         Button(
-                            onClick = { onInstall(plugin.id) },
+                            onClick = { onInstall(plugin) },
+                            enabled = !isInstalling,
                             colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                             shape = RoundedCornerShape(6.dp)
                         ) {
-                            Icon(imageVector = ZaswixIcons.Download, contentDescription = "Install", tint = NetflixWhite, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Install", color = NetflixWhite, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            if (isInstalling) {
+                                CircularProgressIndicator(
+                                    color = NetflixWhite,
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Installing...", color = NetflixWhite, fontSize = 11.sp)
+                            } else {
+                                Icon(imageVector = ZaswixIcons.Download, contentDescription = "Install", tint = NetflixWhite, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Install", color = NetflixWhite, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }

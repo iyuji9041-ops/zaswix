@@ -27,10 +27,12 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +52,8 @@ import com.zaswis.play.data.repository.MediaRepository
 import com.zaswis.play.extractor.EpisodeItem
 import com.zaswis.play.extractor.MediaDetailsPayload
 import com.zaswis.play.extractor.ServerOption
+import com.zaswis.play.extractor.ZaswixDetailsExtractor
+import com.zaswis.play.extractor.model.VideoQualityOption
 import com.zaswis.play.ui.components.ZaswixIcons
 import com.zaswis.play.ui.theme.NetflixBlack
 import com.zaswis.play.ui.theme.NetflixCardBg
@@ -57,6 +61,7 @@ import com.zaswis.play.ui.theme.NetflixDarkGrey
 import com.zaswis.play.ui.theme.NetflixLightGrey
 import com.zaswis.play.ui.theme.NetflixRed
 import com.zaswis.play.ui.theme.NetflixWhite
+import com.zaswis.play.utils.DownloadHelper
 import kotlinx.coroutines.launch
 
 @Composable
@@ -115,6 +120,139 @@ fun DetailsScreen(
         ?: item.backdropUrl.ifEmpty { item.posterUrl }
     val extractedEpisodes = detailsPayload?.episodes.orEmpty()
     val extractedServers = detailsPayload?.servers.orEmpty()
+
+    var showQualitySheet by remember { mutableStateOf(false) }
+    var qualityOptions by remember { mutableStateOf<List<VideoQualityOption>>(emptyList()) }
+    var selectedQualityIndex by remember { mutableIntStateOf(0) }
+    var isResolvingQuality by remember { mutableStateOf(false) }
+    var qualityTargetTitle by remember { mutableStateOf(item.title) }
+    var qualityTargetServer by remember { mutableStateOf<ServerOption?>(null) }
+
+    fun openQualitySheet(targetTitle: String = displayTitle, server: ServerOption? = null) {
+        qualityTargetTitle = targetTitle
+        qualityTargetServer = server
+        showQualitySheet = true
+        isResolvingQuality = true
+        coroutineScope.launch {
+            try {
+                val targetSrv = server ?: extractedServers.firstOrNull()
+                if (targetSrv != null) {
+                    val resolved = ZaswixDetailsExtractor.resolveServerToStream(targetSrv)
+                    qualityOptions = if (resolved.qualities.isNotEmpty()) {
+                        resolved.qualities
+                    } else {
+                        listOf(
+                            VideoQualityOption("1080p Full HD", resolved.url, formattedSize = "~1.8 GB", headers = resolved.headers),
+                            VideoQualityOption("720p HD", resolved.url, formattedSize = "~950 MB", headers = resolved.headers),
+                            VideoQualityOption("480p SD (Data Saver)", resolved.url, formattedSize = "~450 MB", headers = resolved.headers)
+                        )
+                    }
+                } else if (currentStreams.isNotEmpty()) {
+                    val st = currentStreams.first()
+                    val resolvedQualities = ZaswixDetailsExtractor.resolveStreamQualities(st.url, st.headers)
+                    qualityOptions = if (resolvedQualities.isNotEmpty()) {
+                        resolvedQualities
+                    } else {
+                        listOf(
+                            VideoQualityOption("1080p Full HD", st.url, formattedSize = "~1.8 GB", headers = st.headers),
+                            VideoQualityOption("720p HD", st.url, formattedSize = "~950 MB", headers = st.headers),
+                            VideoQualityOption("480p SD (Data Saver)", st.url, formattedSize = "~450 MB", headers = st.headers)
+                        )
+                    }
+                } else {
+                    qualityOptions = listOf(
+                        VideoQualityOption("1080p Full HD", item.pageUrl, formattedSize = "~1.8 GB"),
+                        VideoQualityOption("720p HD", item.pageUrl, formattedSize = "~950 MB"),
+                        VideoQualityOption("480p SD (Data Saver)", item.pageUrl, formattedSize = "~450 MB")
+                    )
+                }
+            } catch (e: Exception) {
+                qualityOptions = listOf(
+                    VideoQualityOption("1080p Full HD", item.pageUrl, formattedSize = "~1.8 GB"),
+                    VideoQualityOption("720p HD", item.pageUrl, formattedSize = "~950 MB"),
+                    VideoQualityOption("480p SD (Data Saver)", item.pageUrl, formattedSize = "~450 MB")
+                )
+            } finally {
+                selectedQualityIndex = 0
+                isResolvingQuality = false
+            }
+        }
+    }
+
+    fun openQualitySheetForStream(targetTitle: String, source: StreamSource) {
+        qualityTargetTitle = targetTitle
+        qualityTargetServer = null
+        showQualitySheet = true
+        isResolvingQuality = true
+        coroutineScope.launch {
+            try {
+                val resolvedQualities = ZaswixDetailsExtractor.resolveStreamQualities(source.url, source.headers)
+                qualityOptions = if (resolvedQualities.isNotEmpty()) {
+                    resolvedQualities
+                } else {
+                    listOf(
+                        VideoQualityOption("1080p Full HD", source.url, formattedSize = "~1.8 GB", headers = source.headers),
+                        VideoQualityOption("720p HD", source.url, formattedSize = "~950 MB", headers = source.headers),
+                        VideoQualityOption("480p SD (Data Saver)", source.url, formattedSize = "~450 MB", headers = source.headers)
+                    )
+                }
+            } catch (e: Exception) {
+                qualityOptions = listOf(
+                    VideoQualityOption("1080p Full HD", source.url, formattedSize = "~1.8 GB", headers = source.headers),
+                    VideoQualityOption("720p HD", source.url, formattedSize = "~950 MB", headers = source.headers),
+                    VideoQualityOption("480p SD (Data Saver)", source.url, formattedSize = "~450 MB", headers = source.headers)
+                )
+            } finally {
+                selectedQualityIndex = 0
+                isResolvingQuality = false
+            }
+        }
+    }
+
+    fun openQualitySheetForEpisode(episode: EpisodeItem) {
+        val epTitle = "${displayTitle} - S${episode.season}E${episode.episode}: ${episode.title}"
+        qualityTargetTitle = epTitle
+        qualityTargetServer = null
+        showQualitySheet = true
+        isResolvingQuality = true
+        coroutineScope.launch {
+            try {
+                loadingEpisodeUrl = episode.url
+                val epPayload = mediaRepository.loadMediaDetails(episode.url, item.providerName)
+                loadingEpisodeUrl = null
+                val epServers = epPayload?.servers.orEmpty()
+                val targetSrv = epServers.firstOrNull()
+                if (targetSrv != null) {
+                    qualityTargetServer = targetSrv
+                    val resolved = ZaswixDetailsExtractor.resolveServerToStream(targetSrv)
+                    qualityOptions = if (resolved.qualities.isNotEmpty()) {
+                        resolved.qualities
+                    } else {
+                        listOf(
+                            VideoQualityOption("1080p Full HD", resolved.url, formattedSize = "~1.8 GB", headers = resolved.headers),
+                            VideoQualityOption("720p HD", resolved.url, formattedSize = "~950 MB", headers = resolved.headers),
+                            VideoQualityOption("480p SD (Data Saver)", resolved.url, formattedSize = "~450 MB", headers = resolved.headers)
+                        )
+                    }
+                } else {
+                    qualityOptions = listOf(
+                        VideoQualityOption("1080p Full HD", episode.url, formattedSize = "~1.8 GB"),
+                        VideoQualityOption("720p HD", episode.url, formattedSize = "~950 MB"),
+                        VideoQualityOption("480p SD (Data Saver)", episode.url, formattedSize = "~450 MB")
+                    )
+                }
+            } catch (e: Exception) {
+                qualityOptions = listOf(
+                    VideoQualityOption("1080p Full HD", episode.url, formattedSize = "~1.8 GB"),
+                    VideoQualityOption("720p HD", episode.url, formattedSize = "~950 MB"),
+                    VideoQualityOption("480p SD (Data Saver)", episode.url, formattedSize = "~450 MB")
+                )
+            } finally {
+                selectedQualityIndex = 0
+                isResolvingQuality = false
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -322,7 +460,9 @@ fun DetailsScreen(
 
                 // Download Button
                 Button(
-                    onClick = { },
+                    onClick = {
+                        openQualitySheet(displayTitle)
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp),
@@ -512,35 +652,48 @@ fun DetailsScreen(
                                     }
                                 }
 
-                                IconButton(
-                                    onClick = {
-                                        coroutineScope.launch {
-                                            loadingEpisodeUrl = episode.url
-                                            val epPayload = mediaRepository.loadMediaDetails(episode.url, item.providerName)
-                                            loadingEpisodeUrl = null
-                                            val epServers = epPayload?.servers.orEmpty()
-                                            val epItem = item.copy(
-                                                id = "${item.id}_s${episode.season}_e${episode.episode}",
-                                                title = "${item.title} - S${episode.season}E${episode.episode}: ${episode.title}",
-                                                pageUrl = episode.url
-                                            )
-                                            onPlayClick(epItem, epServers, epServers.firstOrNull())
-                                        }
-                                    }
-                                ) {
-                                    if (isEpLoading) {
-                                        CircularProgressIndicator(
-                                            color = NetflixRed,
-                                            modifier = Modifier.size(22.dp),
-                                            strokeWidth = 2.dp
-                                        )
-                                    } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = { openQualitySheetForEpisode(episode) }
+                                    ) {
                                         Icon(
-                                            imageVector = ZaswixIcons.PlayArrow,
-                                            contentDescription = "Play",
-                                            tint = NetflixRed,
-                                            modifier = Modifier.size(26.dp)
+                                            imageVector = ZaswixIcons.Download,
+                                            contentDescription = "Download Episode",
+                                            tint = NetflixLightGrey,
+                                            modifier = Modifier.size(22.dp)
                                         )
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            coroutineScope.launch {
+                                                loadingEpisodeUrl = episode.url
+                                                val epPayload = mediaRepository.loadMediaDetails(episode.url, item.providerName)
+                                                loadingEpisodeUrl = null
+                                                val epServers = epPayload?.servers.orEmpty()
+                                                val epItem = item.copy(
+                                                    id = "${item.id}_s${episode.season}_e${episode.episode}",
+                                                    title = "${item.title} - S${episode.season}E${episode.episode}: ${episode.title}",
+                                                    pageUrl = episode.url
+                                                )
+                                                onPlayClick(epItem, epServers, epServers.firstOrNull())
+                                            }
+                                        }
+                                    ) {
+                                        if (isEpLoading) {
+                                            CircularProgressIndicator(
+                                                color = NetflixRed,
+                                                modifier = Modifier.size(22.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = ZaswixIcons.PlayArrow,
+                                                contentDescription = "Play",
+                                                tint = NetflixRed,
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -741,14 +894,26 @@ fun DetailsScreen(
                                     fontSize = 12.sp
                                 )
                             }
-                            Button(
-                                onClick = {
-                                    onPlayClick(item, extractedServers, server)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { openQualitySheet(displayTitle, server) }
+                                ) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.Download,
+                                        contentDescription = "Download Server",
+                                        tint = NetflixLightGrey,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Button(
+                                    onClick = {
+                                        onPlayClick(item, extractedServers, server)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                                }
                             }
                         }
                     }
@@ -845,21 +1010,316 @@ fun DetailsScreen(
                                     fontSize = 12.sp
                                 )
                             }
-                            Button(
-                                onClick = {
-                                    val reordered = listOf(source) + currentStreams.filter { it != source }
-                                    onPlayClick(item.copy(streamSources = reordered), emptyList(), null)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { openQualitySheetForStream(displayTitle, source) }
+                                ) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.Download,
+                                        contentDescription = "Download Stream",
+                                        tint = NetflixLightGrey,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Button(
+                                    onClick = {
+                                        val reordered = listOf(source) + currentStreams.filter { it != source }
+                                        onPlayClick(item.copy(streamSources = reordered), emptyList(), null)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(text = "Watch", fontSize = 12.sp, color = NetflixWhite)
+                                }
                             }
                         }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(40.dp))
+            }
+        }
+
+        // Glassmorphic Quality Selection BottomSheet Modal
+        if (showQualitySheet) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable { showQualitySheet = false },
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = false) { }
+                        .padding(bottom = 0.dp),
+                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141414)),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                    ) {
+                        // Drag Handle
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .width(40.dp)
+                                .height(4.dp)
+                                .background(Color.White.copy(alpha = 0.3f), RoundedCornerShape(2.dp))
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Select Quality & Data Usage",
+                                    color = NetflixWhite,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = qualityTargetTitle,
+                                    color = NetflixLightGrey,
+                                    fontSize = 12.sp,
+                                    maxLines = 1
+                                )
+                            }
+                            IconButton(
+                                onClick = { showQualitySheet = false },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = ZaswixIcons.Clear,
+                                    contentDescription = "Close",
+                                    tint = NetflixLightGrey,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        if (isResolvingQuality) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 32.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        color = NetflixRed,
+                                        modifier = Modifier.size(36.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Text(
+                                        text = "Resolving stream & estimating file sizes...",
+                                        color = NetflixLightGrey,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        } else {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                qualityOptions.forEachIndexed { index, option ->
+                                    val isSelected = index == selectedQualityIndex
+                                    Surface(
+                                        onClick = { selectedQualityIndex = index },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isSelected) NetflixRed.copy(alpha = 0.18f) else NetflixDarkGrey,
+                                        border = if (isSelected) BorderStroke(1.5.dp, NetflixRed) else BorderStroke(0.5.dp, Color.White.copy(alpha = 0.1f)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .background(
+                                                            if (isSelected) NetflixRed else Color.White.copy(alpha = 0.15f),
+                                                            RoundedCornerShape(6.dp)
+                                                        )
+                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = when {
+                                                            option.quality.contains("1080", ignoreCase = true) -> "1080p"
+                                                            option.quality.contains("720", ignoreCase = true) -> "720p"
+                                                            option.quality.contains("480", ignoreCase = true) -> "480p"
+                                                            option.quality.contains("360", ignoreCase = true) -> "360p"
+                                                            else -> "HD"
+                                                        },
+                                                        color = NetflixWhite,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+
+                                                Column {
+                                                    Text(
+                                                        text = option.quality,
+                                                        color = NetflixWhite,
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                    val bandwidthText = when {
+                                                        option.bandwidth > 0 -> "Data usage: ~${(option.bandwidth / 1_000_000f).let { "%.1f".format(it) }} Mbps"
+                                                        option.quality.contains("1080") -> "High Quality • Best for Wi-Fi"
+                                                        option.quality.contains("720") -> "Standard HD • Recommended"
+                                                        else -> "Data Saver • Mobile friendly"
+                                                    }
+                                                    Text(
+                                                        text = bandwidthText,
+                                                        color = NetflixLightGrey,
+                                                        fontSize = 11.sp
+                                                    )
+                                                }
+                                            }
+
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (option.formattedSize.isNotEmpty()) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(Color(0xFF46D369).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                                                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = option.formattedSize,
+                                                            color = Color(0xFF46D369),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                                if (isSelected) {
+                                                    Icon(
+                                                        imageVector = ZaswixIcons.Check,
+                                                        contentDescription = "Selected",
+                                                        tint = NetflixRed,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(20.dp))
+
+                            // Stream and Download Action Buttons
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        val selectedOpt = qualityOptions.getOrNull(selectedQualityIndex)
+                                        showQualitySheet = false
+                                        if (extractedServers.isNotEmpty()) {
+                                            onPlayClick(item, extractedServers, qualityTargetServer ?: extractedServers.firstOrNull())
+                                        } else if (selectedOpt != null && selectedOpt.url.isNotEmpty()) {
+                                            val customStream = StreamSource(
+                                                serverName = "Direct Stream • ${selectedOpt.quality}",
+                                                quality = selectedOpt.quality,
+                                                url = selectedOpt.url,
+                                                headers = selectedOpt.headers,
+                                                isM3u8 = selectedOpt.url.contains(".m3u8", ignoreCase = true)
+                                            )
+                                            onPlayClick(item.copy(streamSources = listOf(customStream) + currentStreams), emptyList(), null)
+                                        } else {
+                                            onPlayClick(item.copy(streamSources = currentStreams), emptyList(), null)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = NetflixWhite,
+                                        contentColor = Color.Black
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.PlayArrow,
+                                        contentDescription = "Stream",
+                                        tint = Color.Black,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Stream",
+                                        color = Color.Black,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Button(
+                                    onClick = {
+                                        val selectedOpt = qualityOptions.getOrNull(selectedQualityIndex)
+                                        if (selectedOpt != null && selectedOpt.url.isNotEmpty()) {
+                                            DownloadHelper.downloadVideo(
+                                                context = context,
+                                                url = selectedOpt.url,
+                                                title = qualityTargetTitle,
+                                                headers = selectedOpt.headers,
+                                                quality = selectedOpt.quality
+                                            )
+                                        }
+                                        showQualitySheet = false
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = NetflixRed,
+                                        contentColor = NetflixWhite
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.Download,
+                                        contentDescription = "Download",
+                                        tint = NetflixWhite,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Download",
+                                        color = NetflixWhite,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

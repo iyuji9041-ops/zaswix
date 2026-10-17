@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -78,89 +79,137 @@ fun HomeScreen(
             .fillMaxSize()
             .background(NetflixBlack)
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 80.dp)
-        ) {
-            // Hero Banner at top (Netflix HorizontalPager)
-            item {
-                HeroBanner(
-                    items = heroBannerItems,
-                    onPlayClick = onPlayClick,
-                    onDetailsClick = onMediaClick
-                )
-            }
-
-            // Provider Quick-Switch Chips Bar (Single-plugin switching)
-            item {
+        if (plugins.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp)
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        text = "ACTIVE SOURCE PROVIDER",
-                        color = NetflixLightGrey,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    Icon(
+                        imageVector = ZaswixIcons.Extension,
+                        contentDescription = "Extensions",
+                        tint = NetflixRed,
+                        modifier = Modifier.size(64.dp)
                     )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No Extensions Installed",
+                        color = NetflixWhite,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "No extensions installed. Please install an extension from the Plugins tab.",
+                        color = NetflixLightGrey,
+                        fontSize = 13.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    androidx.compose.material3.Button(
+                        onClick = onPluginsClick,
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(imageVector = ZaswixIcons.Download, contentDescription = "Install Extensions", tint = NetflixWhite, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Install Extensions", color = NetflixWhite, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
+                // Hero Banner at top (Netflix HorizontalPager)
+                if (heroBannerItems.isNotEmpty()) {
+                    item {
+                        HeroBanner(
+                            items = heroBannerItems,
+                            onPlayClick = onPlayClick,
+                            onDetailsClick = onMediaClick
+                        )
+                    }
+                }
 
-                    Row(
+                // Provider Quick-Switch Chips Bar (Single-plugin switching)
+                item {
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(vertical = 12.dp)
                     ) {
-                        plugins.forEach { plugin ->
-                            val isSelected = plugin.id == selectedPluginId
-                            Surface(
-                                onClick = { pluginManager.selectPlugin(plugin.id) },
-                                shape = RoundedCornerShape(20.dp),
-                                color = if (isSelected) NetflixRed else NetflixDarkGrey,
-                                border = if (isSelected) null else BorderStroke(1.dp, Color(0xFF333333))
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        Text(
+                            text = "ACTIVE SOURCE PROVIDER",
+                            color = NetflixLightGrey,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            plugins.forEach { plugin ->
+                                val isSelected = plugin.id == selectedPluginId
+                                Surface(
+                                    onClick = { pluginManager.selectPlugin(plugin.id) },
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = if (isSelected) NetflixRed else NetflixDarkGrey,
+                                    border = if (isSelected) null else BorderStroke(1.dp, Color(0xFF333333))
                                 ) {
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = ZaswixIcons.Check,
-                                            contentDescription = "Selected",
-                                            tint = NetflixWhite,
-                                            modifier = Modifier.size(14.dp)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = ZaswixIcons.Check,
+                                                contentDescription = "Selected",
+                                                tint = NetflixWhite,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = plugin.name,
+                                            color = NetflixWhite,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                                         )
                                     }
-                                    Text(
-                                        text = plugin.name,
-                                        color = NetflixWhite,
-                                        fontSize = 13.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                    )
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // Categories horizontal carousels
-            items(categories) { category ->
-                MediaRow(
-                    category = category,
-                    onItemClick = onMediaClick
-                )
+                // Categories horizontal carousels
+                items(categories) { category ->
+                    MediaRow(
+                        category = category,
+                        onItemClick = onMediaClick
+                    )
+                }
             }
         }
 
         // Netflix Floating Glass Header Bar
         TopNetflixHeader(
-            activePluginName = activePlugin?.name ?: "BollyFlix",
+            activePluginName = activePlugin?.name ?: "Extensions",
             onProviderClick = { showProviderDialog = true },
             onSearchClick = onSearchClick,
             onPluginsClick = onPluginsClick,

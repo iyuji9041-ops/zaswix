@@ -82,6 +82,7 @@ import com.zaswis.play.ui.theme.NetflixDarkGrey
 import com.zaswis.play.ui.theme.NetflixLightGrey
 import com.zaswis.play.ui.theme.NetflixRed
 import com.zaswis.play.ui.theme.NetflixWhite
+import com.zaswis.play.utils.DownloadHelper
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -200,6 +201,8 @@ fun HybridServerPlayerView(
         if (resolvedStream != null) {
             HybridStreamPlayer(
                 stream = resolvedStream!!,
+                title = item.title,
+                onBackClick = onBackClick,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -296,8 +299,8 @@ fun HybridServerPlayerView(
             }
         }
 
-        // 4. Top Overlay Bar
-        if (isControlsVisible) {
+        // 4. Top Overlay Bar (for embed players)
+        if (isControlsVisible && (resolvedStream == null || !resolvedStream!!.isDirectStream)) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -1206,6 +1209,43 @@ fun NativeExoPlayerView(
                                     fontWeight = FontWeight.Bold
                                 )
                             }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // 5. NATIVE DOWNLOAD BUTTON
+                        Button(
+                            onClick = {
+                                if (currentSource != null) {
+                                    DownloadHelper.downloadVideo(
+                                        context = context,
+                                        url = currentSource.url,
+                                        title = item.title,
+                                        headers = currentSource.headers,
+                                        quality = currentSource.quality
+                                    )
+                                    showSettingsDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp)
+                        ) {
+                            Icon(
+                                imageVector = ZaswixIcons.Download,
+                                contentDescription = "Download Video",
+                                tint = NetflixWhite,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Download Stream (${currentSource?.quality ?: "HD"})",
+                                color = NetflixWhite,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 },

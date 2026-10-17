@@ -2,7 +2,10 @@ package com.zaswis.play.ui.screens
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
+import android.media.AudioManager
 import android.net.Uri
+import android.util.Log
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -36,10 +39,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,12 +55,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -73,11 +83,14 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.zaswis.play.extractor.ResolvedStream
+import com.zaswis.play.extractor.model.VideoQualityOption
 import com.zaswis.play.ui.components.ZaswixIcons
 import com.zaswis.play.ui.theme.NetflixCardBg
+import com.zaswis.play.ui.theme.NetflixDarkGrey
 import com.zaswis.play.ui.theme.NetflixLightGrey
 import com.zaswis.play.ui.theme.NetflixRed
 import com.zaswis.play.ui.theme.NetflixWhite
+import com.zaswis.play.utils.DownloadHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -100,21 +113,37 @@ data class PlayerTrackOption(
     val isSelected: Boolean
 )
 
+private fun formatTime(ms: Long): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val hours = totalSec / 3600
+    val mins = (totalSec % 3600) / 60
+    val secs = totalSec % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, mins, secs)
+    } else {
+        "%02d:%02d".format(mins, secs)
+    }
+}
+
 @OptIn(UnstableApi::class)
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun HybridStreamPlayer(
     stream: ResolvedStream,
+    title: String = "Video",
+    onBackClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         if (stream.isDirectStream) {
             // 1. NATIVE EXOPLAYER (For .m3u8 & .mp4 streams)
             val exoPlayer = remember(stream.url) {
                 val okHttpClient = OkHttpClient.Builder()
+                    .dns(com.zaswis.play.network.CloudflareDns.dns)
                     .followRedirects(true)
                     .followSslRedirects(true)
                     .build()
@@ -138,19 +167,28 @@ fun HybridStreamPlayer(
                     }
             }
 
-            DisposableEffect(stream.url) {
-                onDispose { exoPlayer.release() }
-            }
+            // Required Compose State Variables
+            var isPlaying by remember { mutableStateOf(exoPlayer.playWhenReady) }
+            var currentPosition by remember { mutableLongStateOf(0L) }
+            var duration by remember { mutableLongStateOf(0L) }
+            var showControls by remember { mutableStateOf(true) }
+            var isBuffering by remember { mutableStateOf(true) }
+            var isDraggingSlider by remember { mutableStateOf(false) }
+            var sliderPosition by remember { mutableFloatStateOf(0f) }
+            var lastInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-            // Track state
+            // Audio & Subtitle track state
             var audioTracks by remember { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
             var textTracks by remember { mutableStateOf<List<PlayerTrackOption>>(emptyList()) }
             var areSubtitlesOff by remember { mutableStateOf(false) }
 
-            // Modals & Controls visibility
-            var showTrackControls by remember { mutableStateOf(true) }
+            // Modals visibility
             var showAudioModal by remember { mutableStateOf(false) }
             var showSubtitleModal by remember { mutableStateOf(false) }
+            var showQualityModal by remember { mutableStateOf(false) }
+            var selectedQualityOption by remember(stream.url) {
+                mutableStateOf(stream.qualities.firstOrNull())
+            }
 
             // Gestures feedback state
             var seekFeedbackText by remember { mutableStateOf<String?>(null) }
@@ -160,8 +198,12 @@ fun HybridStreamPlayer(
                 val initBrightness = (context as? Activity)?.window?.attributes?.screenBrightness ?: 0.5f
                 mutableFloatStateOf(if (initBrightness >= 0f) initBrightness else 0.5f)
             }
-
-            var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+            var showVolumeHud by remember { mutableStateOf(false) }
+            var currentVolume by remember {
+                val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+                val curVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 7
+                mutableFloatStateOf(curVol.toFloat() / maxVol.coerceAtLeast(1).toFloat())
+            }
 
             fun refreshTracks() {
                 val tracks = exoPlayer.currentTracks
@@ -180,7 +222,7 @@ fun HybridStreamPlayer(
                             !format.label.isNullOrBlank() -> format.label!!
                             lang.isNotBlank() && lang != "und" -> {
                                 try {
-                                    Locale(lang).getDisplayLanguage(Locale.ENGLISH).ifBlank { lang }
+                                    Locale.forLanguageTag(lang).getDisplayLanguage(Locale.ENGLISH).ifBlank { lang }
                                 } catch (_: Exception) {
                                     lang
                                 }
@@ -211,14 +253,61 @@ fun HybridStreamPlayer(
 
             DisposableEffect(exoPlayer) {
                 val listener = object : Player.Listener {
+                    override fun onIsPlayingChanged(playing: Boolean) {
+                        isPlaying = playing
+                    }
+
+                    override fun onPlaybackStateChanged(state: Int) {
+                        isBuffering = (state == Player.STATE_BUFFERING)
+                        if (state == Player.STATE_READY) {
+                            duration = exoPlayer.duration.coerceAtLeast(0L)
+                        }
+                    }
+
                     override fun onTracksChanged(tracks: Tracks) {
                         refreshTracks()
                     }
                 }
                 exoPlayer.addListener(listener)
+                isPlaying = exoPlayer.isPlaying
+                isBuffering = (exoPlayer.playbackState == Player.STATE_BUFFERING)
+                duration = exoPlayer.duration.coerceAtLeast(0L)
                 refreshTracks()
+
                 onDispose {
                     exoPlayer.removeListener(listener)
+                    exoPlayer.release()
+                }
+            }
+
+            // Sync progress tracking every second
+            LaunchedEffect(exoPlayer, isPlaying) {
+                while (true) {
+                    if (!isDraggingSlider) {
+                        currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        val dur = exoPlayer.duration
+                        if (dur > 0L) {
+                            duration = dur
+                            sliderPosition = (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                        }
+                    }
+                    delay(1000L)
+                }
+            }
+
+            // Auto-hide controls after 3 seconds of inactivity
+            LaunchedEffect(showControls, lastInteractionTime, isPlaying) {
+                if (showControls && isPlaying) {
+                    delay(3000L)
+                    showControls = false
+                }
+            }
+
+            // Double tap feedback auto-hide
+            LaunchedEffect(seekFeedbackText) {
+                if (seekFeedbackText != null) {
+                    delay(800)
+                    seekFeedbackText = null
                 }
             }
 
@@ -257,20 +346,18 @@ fun HybridStreamPlayer(
                 refreshTracks()
             }
 
-            LaunchedEffect(seekFeedbackText) {
-                if (seekFeedbackText != null) {
-                    delay(800)
-                    seekFeedbackText = null
-                }
+            fun notifyUserInteraction() {
+                lastInteractionTime = System.currentTimeMillis()
             }
 
-            // Gesture Container wrapping PlayerView
+            // Outer gesture container wrapping PlayerView & Custom Compose Controls
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
                         detectVerticalDragGestures(
                             onDragStart = { offset ->
+                                notifyUserInteraction()
                                 if (offset.x < size.width / 2f) {
                                     val activity = context as? Activity
                                     val lp = activity?.window?.attributes
@@ -278,20 +365,28 @@ fun HybridStreamPlayer(
                                         currentBrightness = if (lp.screenBrightness >= 0f) lp.screenBrightness else 0.5f
                                         showBrightnessHud = true
                                     }
+                                } else {
+                                    val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+                                    val curVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 7
+                                    currentVolume = curVol.toFloat() / maxVol.coerceAtLeast(1).toFloat()
+                                    showVolumeHud = true
                                 }
                             },
                             onDragEnd = {
                                 coroutineScope.launch {
                                     delay(900)
                                     showBrightnessHud = false
+                                    showVolumeHud = false
                                 }
                             },
                             onDragCancel = {
                                 showBrightnessHud = false
+                                showVolumeHud = false
                             },
                             onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                notifyUserInteraction()
                                 if (change.position.x < size.width / 2f) {
-                                    change.consume()
                                     val activity = context as? Activity
                                     val window = activity?.window
                                     val lp = window?.attributes
@@ -302,6 +397,15 @@ fun HybridStreamPlayer(
                                         window.attributes = lp
                                         showBrightnessHud = true
                                     }
+                                } else {
+                                    val delta = -dragAmount / 350f
+                                    currentVolume = (currentVolume + delta).coerceIn(0f, 1f)
+                                    if (audioManager != null) {
+                                        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                        val targetVol = (currentVolume * maxVol).toInt().coerceIn(0, maxVol)
+                                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
+                                    }
+                                    showVolumeHud = true
                                 }
                             }
                         )
@@ -309,32 +413,32 @@ fun HybridStreamPlayer(
                     .pointerInput(exoPlayer) {
                         detectTapGestures(
                             onDoubleTap = { offset ->
+                                notifyUserInteraction()
                                 val isLeft = offset.x < size.width / 2f
                                 val cur = exoPlayer.currentPosition
                                 if (isLeft) {
                                     val target = (cur - 10_000L).coerceAtLeast(0L)
                                     exoPlayer.seekTo(target)
+                                    currentPosition = target
                                     seekFeedbackText = "-10s"
                                     seekFeedbackIsLeft = true
                                 } else {
                                     val dur = exoPlayer.duration
                                     val target = if (dur > 0) (cur + 10_000L).coerceAtMost(dur) else cur + 10_000L
                                     exoPlayer.seekTo(target)
+                                    currentPosition = target
                                     seekFeedbackText = "+10s"
                                     seekFeedbackIsLeft = false
                                 }
                             },
                             onTap = {
-                                showTrackControls = !showTrackControls
-                                if (playerViewRef?.isControllerFullyVisible == true) {
-                                    playerViewRef?.hideController()
-                                } else {
-                                    playerViewRef?.showController()
-                                }
+                                showControls = !showControls
+                                notifyUserInteraction()
                             }
                         )
                     }
             ) {
+                // 1. AndroidView with useController = false (Requirement 1)
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
@@ -343,17 +447,13 @@ fun HybridStreamPlayer(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
-                            useController = true
-                            setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-                                showTrackControls = (visibility == android.view.View.VISIBLE)
-                            })
-                            playerViewRef = this
+                            useController = false
                         }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Double Tap Seek Ripple/Badge Feedback
+                // 2. Double Tap Seek Ripple/Badge Feedback
                 AnimatedVisibility(
                     visible = seekFeedbackText != null,
                     enter = fadeIn(),
@@ -385,7 +485,7 @@ fun HybridStreamPlayer(
                     }
                 }
 
-                // Brightness HUD Indicator on Left Half
+                // 3. Brightness HUD Indicator on Left Half
                 AnimatedVisibility(
                     visible = showBrightnessHud,
                     enter = fadeIn(),
@@ -432,45 +532,152 @@ fun HybridStreamPlayer(
                     }
                 }
 
-                // Glassmorphic Audio Tracks & Subtitles Buttons (Over Player)
+                // 4. Volume HUD Indicator on Right Half
                 AnimatedVisibility(
-                    visible = showTrackControls,
+                    visible = showVolumeHud,
                     enter = fadeIn(),
                     exit = fadeOut(),
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 64.dp, end = 16.dp)
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 24.dp)
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xDD121212), RoundedCornerShape(16.dp))
+                            .border(1.dp, Color(0x40FFFFFF), RoundedCornerShape(16.dp))
+                            .padding(horizontal = 14.dp, vertical = 18.dp)
                     ) {
-                        // Glassmorphic Audio Tracks Button
-                        GlassmorphicPlayerButton(
-                            icon = ZaswixIcons.Audiotrack,
-                            label = "Audio",
-                            activeLabel = audioTracks.find { it.isSelected }?.name,
-                            onClick = {
-                                showAudioModal = true
-                                showSubtitleModal = false
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = if (currentVolume == 0f) "🔇" else if (currentVolume < 0.5f) "🔉" else "🔊",
+                                fontSize = 20.sp
+                            )
+                            Text(
+                                text = "${(currentVolume * 100).toInt()}%",
+                                color = NetflixWhite,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .width(6.dp)
+                                    .height(90.dp)
+                                    .background(Color.White.copy(alpha = 0.2f), RoundedCornerShape(3.dp)),
+                                contentAlignment = Alignment.BottomCenter
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height((90 * currentVolume).dp)
+                                        .background(Color(0xFF46D369), RoundedCornerShape(3.dp))
+                                )
                             }
-                        )
-
-                        // Glassmorphic Subtitles Button
-                        GlassmorphicPlayerButton(
-                            icon = ZaswixIcons.Subtitles,
-                            label = "Subtitles",
-                            activeLabel = if (areSubtitlesOff) "Off" else (textTracks.find { it.isSelected }?.name ?: "On"),
-                            isActive = !areSubtitlesOff,
-                            onClick = {
-                                showSubtitleModal = true
-                                showAudioModal = false
-                            }
-                        )
+                        }
                     }
                 }
 
-                // Glassmorphic Audio Tracks Selection Modal
+                // 5. CustomPlayerControls Composable Overlay (Fades out after 3 seconds)
+                AnimatedVisibility(
+                    visible = showControls,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    CustomPlayerControls(
+                        title = title,
+                        isPlaying = isPlaying,
+                        isBuffering = isBuffering,
+                        currentPosition = currentPosition,
+                        duration = duration,
+                        isDraggingSlider = isDraggingSlider,
+                        sliderPosition = sliderPosition,
+                        onPlayPauseToggle = {
+                            val willPlay = !exoPlayer.playWhenReady
+                            exoPlayer.playWhenReady = willPlay
+                            isPlaying = willPlay
+                            notifyUserInteraction()
+                        },
+                        onSliderChange = { newProgress ->
+                            isDraggingSlider = true
+                            sliderPosition = newProgress
+                            notifyUserInteraction()
+                        },
+                        onSliderChangeFinished = {
+                            val targetTime = (sliderPosition * duration).toLong().coerceIn(0L, duration.coerceAtLeast(0L))
+                            exoPlayer.seekTo(targetTime)
+                            currentPosition = targetTime
+                            isDraggingSlider = false
+                            notifyUserInteraction()
+                        },
+                        onRewind10s = {
+                            val cur = exoPlayer.currentPosition
+                            val target = (cur - 10_000L).coerceAtLeast(0L)
+                            exoPlayer.seekTo(target)
+                            currentPosition = target
+                            seekFeedbackText = "-10s"
+                            seekFeedbackIsLeft = true
+                            notifyUserInteraction()
+                        },
+                        onFastForward10s = {
+                            val cur = exoPlayer.currentPosition
+                            val dur = exoPlayer.duration
+                            val target = if (dur > 0) (cur + 10_000L).coerceAtMost(dur) else cur + 10_000L
+                            exoPlayer.seekTo(target)
+                            currentPosition = target
+                            seekFeedbackText = "+10s"
+                            seekFeedbackIsLeft = false
+                            notifyUserInteraction()
+                        },
+                        onBackClick = onBackClick,
+                        onSettingsClick = {
+                            Log.d("HybridStreamPlayer", "Settings/CC clicked: opening Quality/Subtitle BottomSheet")
+                            showQualityModal = true
+                            notifyUserInteraction()
+                        },
+                        onAudioClick = {
+                            showAudioModal = true
+                            showSubtitleModal = false
+                            showQualityModal = false
+                            notifyUserInteraction()
+                        },
+                        onSubtitleClick = {
+                            showSubtitleModal = true
+                            showAudioModal = false
+                            showQualityModal = false
+                            notifyUserInteraction()
+                        },
+                        onQualityClick = {
+                            showQualityModal = true
+                            showAudioModal = false
+                            showSubtitleModal = false
+                            notifyUserInteraction()
+                        },
+                        onDownloadClick = {
+                            val activeOpt = selectedQualityOption ?: stream.qualities.firstOrNull()
+                            val dlUrl = activeOpt?.url ?: stream.url
+                            val dlQuality = activeOpt?.quality ?: "HD"
+                            val dlHeaders = activeOpt?.headers?.ifEmpty { stream.headers } ?: stream.headers
+                            DownloadHelper.downloadVideo(
+                                context = context,
+                                url = dlUrl,
+                                title = title,
+                                headers = dlHeaders,
+                                quality = dlQuality
+                            )
+                            notifyUserInteraction()
+                        },
+                        selectedAudioLabel = audioTracks.find { it.isSelected }?.name,
+                        selectedSubtitleLabel = if (areSubtitlesOff) "Off" else (textTracks.find { it.isSelected }?.name ?: "On"),
+                        selectedQualityLabel = selectedQualityOption?.quality ?: (if (stream.qualities.isNotEmpty()) stream.qualities.first().quality else "HD"),
+                        areSubtitlesOff = areSubtitlesOff,
+                        onUserInteraction = { notifyUserInteraction() }
+                    )
+                }
+
+                // 6. Glassmorphic Audio Tracks Selection Modal
                 if (showAudioModal) {
                     GlassmorphicTrackModal(
                         title = "Audio Tracks",
@@ -502,7 +709,7 @@ fun HybridStreamPlayer(
                     }
                 }
 
-                // Glassmorphic Subtitles Selection Modal
+                // 7. Glassmorphic Subtitles Selection Modal
                 if (showSubtitleModal) {
                     GlassmorphicTrackModal(
                         title = "Subtitles & Captions",
@@ -510,7 +717,6 @@ fun HybridStreamPlayer(
                         onDismiss = { showSubtitleModal = false }
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            // Off option
                             TrackItemRow(
                                 title = "Off",
                                 subText = null,
@@ -544,6 +750,78 @@ fun HybridStreamPlayer(
                         }
                     }
                 }
+
+                // 8. Glassmorphic Video Quality & Size Selection Modal
+                if (showQualityModal) {
+                    GlassmorphicTrackModal(
+                        title = "Video Quality & Size",
+                        icon = ZaswixIcons.Settings,
+                        onDismiss = { showQualityModal = false }
+                    ) {
+                        val qualitiesToDisplay = if (stream.qualities.isNotEmpty()) stream.qualities else listOf(
+                            VideoQualityOption(quality = "1080p Full HD", url = stream.url, formattedSize = "~1.8 GB", headers = stream.headers),
+                            VideoQualityOption(quality = "720p HD", url = stream.url, formattedSize = "~950 MB", headers = stream.headers),
+                            VideoQualityOption(quality = "480p SD (Data Saver)", url = stream.url, formattedSize = "~450 MB", headers = stream.headers)
+                        )
+
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            qualitiesToDisplay.forEach { opt ->
+                                val isSelected = opt.quality == (selectedQualityOption?.quality ?: qualitiesToDisplay.first().quality)
+                                TrackItemRow(
+                                    title = opt.quality,
+                                    subText = if (opt.formattedSize.isNotEmpty()) "Estimated: ${opt.formattedSize}" else null,
+                                    isSelected = isSelected,
+                                    onClick = {
+                                        selectedQualityOption = opt
+                                        if (opt.url != stream.url && opt.url.isNotBlank()) {
+                                            val currentPos = exoPlayer.currentPosition
+                                            exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(opt.url)))
+                                            exoPlayer.seekTo(currentPos)
+                                            exoPlayer.prepare()
+                                            exoPlayer.play()
+                                        }
+                                        showQualityModal = false
+                                    }
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Button(
+                                onClick = {
+                                    val activeOpt = selectedQualityOption ?: qualitiesToDisplay.first()
+                                    DownloadHelper.downloadVideo(
+                                        context = context,
+                                        url = activeOpt.url,
+                                        title = title,
+                                        headers = activeOpt.headers.ifEmpty { stream.headers },
+                                        quality = activeOpt.quality
+                                    )
+                                    showQualityModal = false
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = ZaswixIcons.Download,
+                                    contentDescription = "Download",
+                                    tint = NetflixWhite,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Download Quality (${selectedQualityOption?.quality ?: qualitiesToDisplay.first().quality})",
+                                    color = NetflixWhite,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
             }
         } else {
             // 2. AD-BLOCKED EMBED PLAYER (For ModiPlay, Vidrift, VIDOUT, Cloudy, AbyssPlayer)
@@ -557,7 +835,6 @@ fun HybridStreamPlayer(
                             mediaPlaybackRequiresUserGesture = false
                             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                             userAgentString = stream.headers["User-Agent"]
-                            // Disable popups & new windows completely
                             javaScriptCanOpenWindowsAutomatically = false
                             setSupportMultipleWindows(false)
                         }
@@ -568,7 +845,6 @@ fun HybridStreamPlayer(
                                 request: WebResourceRequest?
                             ): WebResourceResponse? {
                                 val reqUrl = request?.url?.toString()?.lowercase().orEmpty()
-                                // Block all ad scripts and popunder networks
                                 if (AD_DOMAINS.any { reqUrl.contains(it) }) {
                                     return WebResourceResponse(
                                         "text/plain",
@@ -584,7 +860,6 @@ fun HybridStreamPlayer(
                                 request: WebResourceRequest?
                             ): Boolean {
                                 val targetUrl = request?.url?.toString().orEmpty()
-                                // Prevent ad redirects from leaving the video embed domain
                                 val embedHost = Uri.parse(stream.url).host.orEmpty()
                                 return !targetUrl.contains(embedHost)
                             }
@@ -600,6 +875,251 @@ fun HybridStreamPlayer(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+        }
+    }
+}
+
+/**
+ * Custom Compose UI Overlay for Video Playback (Netflix / Cloudstream Style)
+ */
+@Composable
+fun CustomPlayerControls(
+    title: String,
+    isPlaying: Boolean,
+    isBuffering: Boolean,
+    currentPosition: Long,
+    duration: Long,
+    isDraggingSlider: Boolean,
+    sliderPosition: Float,
+    onPlayPauseToggle: () -> Unit,
+    onSliderChange: (Float) -> Unit,
+    onSliderChangeFinished: () -> Unit,
+    onRewind10s: () -> Unit,
+    onFastForward10s: () -> Unit,
+    onBackClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onAudioClick: () -> Unit,
+    onSubtitleClick: () -> Unit,
+    onQualityClick: () -> Unit,
+    onDownloadClick: () -> Unit,
+    selectedAudioLabel: String?,
+    selectedSubtitleLabel: String?,
+    selectedQualityLabel: String?,
+    areSubtitlesOff: Boolean,
+    onUserInteraction: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.35f))
+    ) {
+        // Top Bar: Glassmorphic Top Row featuring Back Arrow & Video Title
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.85f),
+                            Color.Transparent
+                        )
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    onUserInteraction()
+                    onBackClick()
+                },
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                    .size(38.dp)
+            ) {
+                Icon(
+                    imageVector = ZaswixIcons.ArrowBack,
+                    contentDescription = "Back",
+                    tint = NetflixWhite,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Text(
+                text = title,
+                color = NetflixWhite,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+
+            // Top-right glassmorphic action pills
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlassmorphicPlayerButton(
+                    icon = ZaswixIcons.Audiotrack,
+                    label = "Audio",
+                    activeLabel = selectedAudioLabel,
+                    onClick = onAudioClick
+                )
+
+                GlassmorphicPlayerButton(
+                    icon = ZaswixIcons.Subtitles,
+                    label = "Subtitles",
+                    activeLabel = selectedSubtitleLabel,
+                    isActive = !areSubtitlesOff,
+                    onClick = onSubtitleClick
+                )
+
+                GlassmorphicPlayerButton(
+                    icon = ZaswixIcons.Download,
+                    label = "Download",
+                    activeLabel = selectedQualityLabel,
+                    onClick = onDownloadClick
+                )
+            }
+        }
+
+        // Center Controls: Rewind 10s, Large Clean Play/Pause, Forward 10s
+        Row(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalArrangement = Arrangement.spacedBy(36.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Rewind 10s button
+            Surface(
+                onClick = onRewind10s,
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.5f),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                modifier = Modifier.size(52.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "↺", color = NetflixWhite, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "10s", color = NetflixWhite, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // Center Play / Pause / Buffering Indicator
+            if (isBuffering) {
+                Box(
+                    modifier = Modifier
+                        .size(76.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = NetflixRed,
+                        modifier = Modifier.size(46.dp),
+                        strokeWidth = 3.dp
+                    )
+                }
+            } else {
+                Surface(
+                    onClick = onPlayPauseToggle,
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.6f),
+                    border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.4f)),
+                    shadowElevation = 8.dp,
+                    modifier = Modifier.size(76.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                        Icon(
+                            imageVector = if (isPlaying) ZaswixIcons.Pause else ZaswixIcons.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = NetflixWhite,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+                }
+            }
+
+            // Forward 10s button
+            Surface(
+                onClick = onFastForward10s,
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.5f),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                modifier = Modifier.size(52.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "↻", color = NetflixWhite, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "10s", color = NetflixWhite, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // Bottom Bar: Compose Slider Seek Bar, Timers, and Settings/CC Icon
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.9f)
+                        )
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Seek Bar Slider
+                Slider(
+                    value = if (isDraggingSlider) sliderPosition else (if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f),
+                    onValueChange = onSliderChange,
+                    onValueChangeFinished = onSliderChangeFinished,
+                    colors = SliderDefaults.colors(
+                        thumbColor = NetflixRed,
+                        activeTrackColor = NetflixRed,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                // Current Time / Total Duration Text
+                Text(
+                    text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
+                    color = NetflixWhite,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // Settings / CC Icon (logs message and opens quality/subtitle modal)
+                IconButton(
+                    onClick = onSettingsClick,
+                    modifier = Modifier
+                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                        .size(34.dp)
+                ) {
+                    Icon(
+                        imageVector = ZaswixIcons.Settings,
+                        contentDescription = "Settings / CC",
+                        tint = NetflixWhite,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
     }
 }

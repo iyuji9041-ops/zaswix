@@ -151,6 +151,7 @@ fun ZaswixApp(
                 Screen.Search.route -> {
                     SearchScreen(
                         mediaRepository = mediaRepository,
+                        pluginManager = pluginManager,
                         onMediaClick = { selectedItem = it }
                     )
                 }

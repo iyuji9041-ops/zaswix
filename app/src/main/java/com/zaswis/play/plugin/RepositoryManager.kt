@@ -1,6 +1,7 @@
 package com.zaswis.play.plugin
 
 import android.content.Context
+import com.zaswis.play.data.model.PluginInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -27,20 +28,23 @@ data class PluginManifestItem(
 object RepositoryManager {
 
     private val client = OkHttpClient.Builder()
+        .dns(com.zaswis.play.network.CloudflareDns.dns)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
     /**
-     * Fetches remote plugins.json, downloads each APK to context.filesDir/plugins,
-     * and passes each to PluginManager.loadExtension().
+     * Fetches plugins manifest from a repository URL and parses into PluginInfo objects.
      */
-    suspend fun fetchAndInstallPlugins(context: Context, repoUrl: String): List<ZaswixPlugin> = withContext(Dispatchers.IO) {
-        val loadedList = mutableListOf<ZaswixPlugin>()
+    suspend fun fetchRepositoryPlugins(repoUrl: String): List<PluginInfo> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<PluginInfo>()
         try {
+            val cleanUrl = repoUrl.trim()
+            if (cleanUrl.isBlank()) return@withContext emptyList()
+
             val request = Request.Builder()
-                .url(repoUrl)
+                .url(cleanUrl)
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .build()
 
@@ -51,18 +55,73 @@ object RepositoryManager {
 
             if (jsonContent.isBlank()) return@withContext emptyList()
 
-            val items = parsePluginsJson(jsonContent)
+            val trimmed = jsonContent.trim()
+            val jsonArray = if (trimmed.startsWith("[")) {
+                JSONArray(trimmed)
+            } else {
+                val root = JSONObject(trimmed)
+                root.optJSONArray("plugins") ?: JSONArray()
+            }
+
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.optJSONObject(i) ?: continue
+                val name = obj.optString("name", "").trim()
+                val className = obj.optString("className", "").trim()
+                val downloadUrl = (obj.optString("downloadUrl", "").ifBlank { obj.optString("url", "") }).trim()
+                val id = obj.optString("id", "").ifBlank {
+                    name.lowercase().replace("[^a-z0-9]".toRegex(), "")
+                }.trim()
+                val version = obj.optString("version", "1.0.0").trim()
+                val description = obj.optString("description", "").trim()
+                val iconUrl = obj.optString("iconUrl", "").trim()
+                val category = obj.optString("category", "General").trim()
+                val siteUrl = obj.optString("siteUrl", "").trim()
+
+                if (name.isNotEmpty() && className.isNotEmpty() && downloadUrl.isNotEmpty()) {
+                    list.add(
+                        PluginInfo(
+                            id = id,
+                            name = name,
+                            version = version,
+                            siteUrl = siteUrl,
+                            description = description,
+                            iconUrl = iconUrl,
+                            category = category,
+                            downloadUrl = downloadUrl,
+                            className = className,
+                            isEnabled = true,
+                            isInstalled = false
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        list
+    }
+
+    /**
+     * Fetches remote plugins.json, downloads each APK to context.filesDir/plugins,
+     * and passes each to PluginManager.loadExtension().
+     */
+    suspend fun fetchAndInstallPlugins(context: Context, repoUrl: String): List<ZaswixPlugin> = withContext(Dispatchers.IO) {
+        val loadedList = mutableListOf<ZaswixPlugin>()
+        try {
+            val items = fetchRepositoryPlugins(repoUrl)
 
             for (item in items) {
-                if (item.url.isNotBlank() && item.className.isNotBlank()) {
-                    val downloadedApk = downloadPluginApk(context, item.url, item.className)
+                if (item.downloadUrl.isNotBlank() && item.className.isNotBlank()) {
+                    val downloadedApk = downloadPluginApk(context, item.downloadUrl, item.className)
                     if (downloadedApk != null && downloadedApk.exists()) {
                         // Save metadata alongside the APK for auto-reloading across cold starts
                         val metaFile = File(downloadedApk.parentFile, downloadedApk.nameWithoutExtension + ".json")
                         val metaObj = JSONObject().apply {
+                            put("id", item.id)
                             put("name", item.name)
                             put("className", item.className)
                             put("version", item.version)
+                            put("downloadUrl", item.downloadUrl)
                         }
                         metaFile.writeText(metaObj.toString())
 
@@ -130,7 +189,7 @@ object RepositoryManager {
 
     private fun downloadPluginApk(context: Context, downloadUrl: String, className: String): File? {
         val safeName = className.replace(".", "_") + ".apk"
-        val pluginsDir = File(context.filesDir, "plugins").apply { mkdirs() }
+        val pluginsDir = context.getDir("plugins", Context.MODE_PRIVATE)
         val targetFile = File(pluginsDir, safeName)
 
         val request = Request.Builder()
