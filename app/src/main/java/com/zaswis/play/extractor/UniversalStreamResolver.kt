@@ -193,6 +193,43 @@ object UniversalStreamResolver {
             "Referer" to server.embedUrl
         )
 
+        // 0. Instant Bypass: If URL is already a direct playable stream (.mp4, .m3u8, .mkv, or Google CDN)
+        val lowerUrl = server.embedUrl.lowercase()
+        if (lowerUrl.contains("video-downloads.googleusercontent.com") ||
+            lowerUrl.contains(".m3u8") ||
+            lowerUrl.contains(".mp4") ||
+            lowerUrl.contains(".mkv")
+        ) {
+            val qualities = resolveStreamQualities(server.embedUrl, defaultHeaders)
+            return@withContext ResolvedStream(
+                url = server.embedUrl,
+                headers = defaultHeaders,
+                isDirectStream = true,
+                qualities = qualities,
+                estimatedSize = qualities.firstOrNull()?.formattedSize.orEmpty()
+            )
+        }
+
+        // 1. Check ExtractorRegistry for supported hosts (HubCloud, Filemoon, DoodStream, Streamwish, Streamtape, GDFlix, PixelDrain)
+        val registry = ExtractorRegistry()
+        if (registry.canHandle(server.embedUrl)) {
+            try {
+                val extracted = registry.extract(server.embedUrl, server.referer)
+                val first = extracted.firstOrNull()
+                if (first != null && (first.url.contains(".m3u8") || first.url.contains(".mp4") || first.url.contains(".mkv") || first.url.contains("video-downloads.googleusercontent.com") || first.url.contains("pixeldrain.com"))) {
+                    val finalHeaders = if (first.headers.isNotEmpty()) first.headers else defaultHeaders
+                    val qualities = resolveStreamQualities(first.url, finalHeaders)
+                    return@withContext ResolvedStream(
+                        url = first.url,
+                        headers = finalHeaders,
+                        isDirectStream = true,
+                        qualities = qualities,
+                        estimatedSize = qualities.firstOrNull()?.formattedSize.orEmpty()
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+
         try {
             val req = Request.Builder()
                 .url(server.embedUrl)
@@ -201,12 +238,13 @@ object UniversalStreamResolver {
                 .build()
 
             val html = client.newCall(req).execute().use { it.body?.string().orEmpty() }
+            val cleanHtml = html.replace("\\/", "/")
 
-            // 1. Check for direct .m3u8 or .mp4 in HTML
-            val m3u8Regex = Pattern.compile("""["'](https?://[^"'\s]+\.(?:m3u8|mp4)[^"'\s]*)["']""")
-            val matcher = m3u8Regex.matcher(html)
+            // 2. Check for direct .m3u8 or .mp4 or .mkv in unescaped HTML
+            val streamRegex = Pattern.compile("""["'](https?://[^"'\s<>]+\.(?:m3u8|mp4|mkv)[^"'\s<>]*)["']""")
+            val matcher = streamRegex.matcher(cleanHtml)
             if (matcher.find()) {
-                val directUrl = matcher.group(1)!!
+                val directUrl = matcher.group(1)!!.replace("\\", "")
                 val qualities = resolveStreamQualities(directUrl, defaultHeaders)
                 val primaryQuality = qualities.firstOrNull()
                 val estimatedSize = primaryQuality?.formattedSize.orEmpty()
@@ -220,12 +258,13 @@ object UniversalStreamResolver {
                 )
             }
 
-            // 2. Check for packed JS
-            val unpacked = unpackJs(html)
+            // 3. Check for packed JS
+            val unpacked = unpackJs(html) ?: unpackJs(cleanHtml)
             if (unpacked != null) {
-                val unpackedMatcher = m3u8Regex.matcher(unpacked)
+                val cleanUnpacked = unpacked.replace("\\/", "/")
+                val unpackedMatcher = streamRegex.matcher(cleanUnpacked)
                 if (unpackedMatcher.find()) {
-                    val directUrl = unpackedMatcher.group(1)!!
+                    val directUrl = unpackedMatcher.group(1)!!.replace("\\", "")
                     val qualities = resolveStreamQualities(directUrl, defaultHeaders)
                     val primaryQuality = qualities.firstOrNull()
                     val estimatedSize = primaryQuality?.formattedSize.orEmpty()
@@ -237,6 +276,28 @@ object UniversalStreamResolver {
                         qualities = qualities,
                         estimatedSize = estimatedSize
                     )
+                }
+            }
+
+            // 4. Check for nested iframes that ExtractorRegistry can handle
+            val iframePattern = Pattern.compile("""<iframe[^>]+src=["'](https?://[^"']+)["']""", Pattern.CASE_INSENSITIVE)
+            val ifrMatcher = iframePattern.matcher(cleanHtml)
+            while (ifrMatcher.find()) {
+                val ifrUrl = ifrMatcher.group(1)!!
+                if (registry.canHandle(ifrUrl)) {
+                    val extracted = registry.extract(ifrUrl, server.embedUrl)
+                    val first = extracted.firstOrNull()
+                    if (first != null && (first.url.contains(".m3u8") || first.url.contains(".mp4") || first.url.contains(".mkv"))) {
+                        val finalHeaders = if (first.headers.isNotEmpty()) first.headers else defaultHeaders
+                        val qualities = resolveStreamQualities(first.url, finalHeaders)
+                        return@withContext ResolvedStream(
+                            url = first.url,
+                            headers = finalHeaders,
+                            isDirectStream = true,
+                            qualities = qualities,
+                            estimatedSize = qualities.firstOrNull()?.formattedSize.orEmpty()
+                        )
+                    }
                 }
             }
         } catch (e: Exception) {

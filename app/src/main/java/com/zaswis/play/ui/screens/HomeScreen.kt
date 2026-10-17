@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -66,12 +67,43 @@ fun HomeScreen(
 ) {
     val plugins by pluginManager.plugins.collectAsState()
     val selectedPluginId by pluginManager.selectedPluginId.collectAsState()
-    val categories by mediaRepository.getHomeCategories(selectedPluginId).collectAsState(initial = emptyList())
+    val categoriesFlow = remember(selectedPluginId) { mediaRepository.getHomeCategories(selectedPluginId) }
+    val categories by categoriesFlow.collectAsState(initial = emptyList())
     val heroBannerItems by mediaRepository.heroBannerItems.collectAsState()
     var showProviderDialog by remember { mutableStateOf(false) }
+    var selectedFilter by remember { mutableStateOf("All") }
 
     val activePlugin = remember(plugins, selectedPluginId) {
         plugins.find { it.id == selectedPluginId } ?: plugins.firstOrNull()
+    }
+
+    val filterTabs = remember(categories) {
+        val base = mutableListOf("All")
+        val allTitles = categories.map { it.title.lowercase() }
+        if (allTitles.any { it.contains("movie") || it.contains("film") }) base.add("Movies")
+        if (allTitles.any { it.contains("series") || it.contains("show") || it.contains("season") }) base.add("Series")
+        if (allTitles.any { it.contains("anime") || it.contains("toon") || it.contains("animation") }) base.add("Anime")
+        if (allTitles.any { it.contains("trend") || it.contains("featured") || it.contains("top") || it.contains("fresh") }) base.add("Trending")
+        if (allTitles.any { it.contains("hindi") || it.contains("dub") }) base.add("Hindi Dubbed")
+        base.distinct()
+    }
+
+    val displayedCategories = remember(categories, selectedFilter) {
+        if (selectedFilter == "All") {
+            categories
+        } else {
+            categories.filter { cat ->
+                val t = cat.title.lowercase()
+                when (selectedFilter) {
+                    "Movies" -> t.contains("movie") || t.contains("film")
+                    "Series" -> t.contains("series") || t.contains("show") || t.contains("season")
+                    "Anime" -> t.contains("anime") || t.contains("toon") || t.contains("animation")
+                    "Trending" -> t.contains("trend") || t.contains("featured") || t.contains("top") || t.contains("fresh")
+                    "Hindi Dubbed" -> t.contains("hindi") || t.contains("dub")
+                    else -> t.contains(selectedFilter.lowercase())
+                }
+            }.ifEmpty { categories }
+        }
     }
 
     Box(
@@ -126,7 +158,7 @@ fun HomeScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 80.dp)
+                contentPadding = PaddingValues(top = if (heroBannerItems.isEmpty()) 72.dp else 0.dp, bottom = 80.dp)
             ) {
                 // Hero Banner at top (Netflix HorizontalPager)
                 if (heroBannerItems.isNotEmpty()) {
@@ -139,66 +171,68 @@ fun HomeScreen(
                     }
                 }
 
-                // Provider Quick-Switch Chips Bar (Single-plugin switching)
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp)
-                    ) {
-                        Text(
-                            text = "ACTIVE SOURCE PROVIDER",
-                            color = NetflixLightGrey,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                        )
-
+                // Category Filter Bar (Netflix-style horizontal pill chips)
+                if (categories.isNotEmpty() && filterTabs.size > 1) {
+                    item {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 12.dp),
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            plugins.forEach { plugin ->
-                                val isSelected = plugin.id == selectedPluginId
+                            filterTabs.forEach { tab ->
+                                val isSelected = selectedFilter == tab
                                 Surface(
-                                    onClick = { pluginManager.selectPlugin(plugin.id) },
+                                    modifier = Modifier.clickable { selectedFilter = tab },
                                     shape = RoundedCornerShape(20.dp),
-                                    color = if (isSelected) NetflixRed else NetflixDarkGrey,
-                                    border = if (isSelected) null else BorderStroke(1.dp, Color(0xFF333333))
+                                    color = if (isSelected) NetflixWhite else Color(0x22FFFFFF),
+                                    border = if (isSelected) null else BorderStroke(1.dp, Color(0x33FFFFFF))
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        if (isSelected) {
-                                            Icon(
-                                                imageVector = ZaswixIcons.Check,
-                                                contentDescription = "Selected",
-                                                tint = NetflixWhite,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                        Text(
-                                            text = plugin.name,
-                                            color = NetflixWhite,
-                                            fontSize = 13.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                        )
-                                    }
+                                    Text(
+                                        text = tab,
+                                        color = if (isSelected) Color.Black else NetflixWhite,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
                                 }
                             }
                         }
                     }
                 }
 
+                // Loading indicator if categories are still fetching
+                if (categories.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(320.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    color = NetflixRed,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    text = "Loading ${activePlugin?.name ?: "Media"}...",
+                                    color = NetflixLightGrey,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Categories horizontal carousels
-                items(categories) { category ->
+                items(displayedCategories) { category ->
                     MediaRow(
                         category = category,
                         onItemClick = onMediaClick

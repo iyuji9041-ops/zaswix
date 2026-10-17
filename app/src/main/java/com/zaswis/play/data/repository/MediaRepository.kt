@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -114,8 +116,9 @@ class MediaRepository(context: Context? = null) {
             plugins.map { plugin ->
                 async {
                     try {
-                        plugin.search(query).map { it.toModelMediaItem(plugin.providerName) }
-                    } catch (e: Exception) {
+                        val pName = PluginManager.getSafeProviderName(plugin)
+                        plugin.search(query).map { it.toModelMediaItem(pName) }
+                    } catch (t: Throwable) {
                         emptyList()
                     }
                 }
@@ -134,10 +137,12 @@ class MediaRepository(context: Context? = null) {
 
         try {
             val matchingPlugin = plugins.find { plugin ->
-                plugin.providerName.equals(providerName, ignoreCase = true) ||
-                url.contains(plugin.providerName.lowercase().replace("\\s+".toRegex(), ""), ignoreCase = true)
+                val pName = PluginManager.getSafeProviderName(plugin)
+                pName.equals(providerName, ignoreCase = true) ||
+                url.contains(pName.lowercase().replace("\\s+".toRegex(), ""), ignoreCase = true)
             } ?: plugins.firstOrNull { plugin ->
-                url.contains(plugin.providerName.take(4), ignoreCase = true)
+                val pName = PluginManager.getSafeProviderName(plugin)
+                url.contains(pName.take(4), ignoreCase = true)
             } ?: plugins.firstOrNull()
 
             if (matchingPlugin != null) {
@@ -157,7 +162,7 @@ class MediaRepository(context: Context? = null) {
                 }
             }
             null
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             null
         }
     }
@@ -186,50 +191,56 @@ class MediaRepository(context: Context? = null) {
      * If loadedPlugins is empty, returns empty list.
      * If plugins are loaded, iterates through them and calls plugin.getHomePage() dynamically.
      */
-    fun getHomeCategories(pluginId: String = "all"): Flow<List<MediaCategory>> = flow {
-        val allPlugins = PluginManager.loadedPlugins.value
-        if (allPlugins.isEmpty()) {
-            _heroBannerItems.value = emptyList()
-            emit(emptyList())
-            return@flow
-        }
-
-        val pluginsToRun = if (pluginId.isBlank() || pluginId == "all") {
-            allPlugins
-        } else {
-            allPlugins.filter {
-                it.providerName.equals(pluginId, ignoreCase = true) ||
-                it.providerName.lowercase().replace("\\s+".toRegex(), "") == pluginId.lowercase()
-            }
-        }.ifEmpty { allPlugins }
-
-        coroutineScope {
-            val payloads = pluginsToRun.map { plugin ->
-                async {
-                    try {
-                        plugin.getHomePage()
-                    } catch (e: Exception) {
-                        null
-                    }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun getHomeCategories(pluginId: String = "all"): Flow<List<MediaCategory>> =
+        PluginManager.loadedPlugins.flatMapLatest { allPlugins ->
+            flow {
+                if (allPlugins.isEmpty()) {
+                    _heroBannerItems.value = emptyList()
+                    emit(emptyList())
+                    return@flow
                 }
-            }.awaitAll().filterNotNull()
 
-            val combinedHeroes = payloads.flatMap { it.heroBannerItems }
-                .distinctBy { it.title }
-                .take(10)
-                .map { it.toMediaItem() }
+                val pluginsToRun = if (pluginId.isBlank() || pluginId == "all") {
+                    allPlugins
+                } else {
+                    allPlugins.filter {
+                        val pName = PluginManager.getSafeProviderName(it)
+                        val pId = pName.lowercase().replace("[^a-z0-9]".toRegex(), "")
+                        val targetId = pluginId.lowercase().replace("[^a-z0-9]".toRegex(), "")
+                        pName.equals(pluginId, ignoreCase = true) || pId == targetId
+                    }
+                }.ifEmpty { allPlugins }
 
-            if (combinedHeroes.isNotEmpty()) {
-                _heroBannerItems.value = combinedHeroes
+                coroutineScope {
+                    val payloads = pluginsToRun.map { plugin ->
+                        async {
+                            try {
+                                plugin.getHomePage()
+                            } catch (t: Throwable) {
+                                android.util.Log.e("MediaRepository", "Error running getHomePage for plugin: ${t.message}", t)
+                                null
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+
+                    val combinedHeroes = payloads.flatMap { it.heroBannerItems }
+                        .distinctBy { it.title }
+                        .take(10)
+                        .map { it.toMediaItem() }
+
+                    if (combinedHeroes.isNotEmpty()) {
+                        _heroBannerItems.value = combinedHeroes
+                    }
+
+                    val categories = payloads.flatMap { it.categoryRows }
+                        .filter { it.items.isNotEmpty() }
+                        .map { it.toMediaCategory() }
+
+                    emit(categories)
+                }
             }
-
-            val categories = payloads.flatMap { it.categoryRows }
-                .filter { it.items.isNotEmpty() }
-                .map { it.toMediaCategory() }
-
-            emit(categories)
         }
-    }
 
     private fun ScrapedMediaItem.toMediaItem(): MediaItem {
         val mediaType = when (type.lowercase()) {

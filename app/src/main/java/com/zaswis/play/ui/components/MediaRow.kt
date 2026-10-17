@@ -44,7 +44,8 @@ fun MediaRow(
             contentPadding = PaddingValues(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(category.items, key = { it.id }) { item ->
+            items(category.items.size, key = { index -> "${category.title}_${category.items[index].id}_$index" }) { index ->
+                val item = category.items[index]
                 MediaCard(
                     item = item,
                     onClick = onItemClick

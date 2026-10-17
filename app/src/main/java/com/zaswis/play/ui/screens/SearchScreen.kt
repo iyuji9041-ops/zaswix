@@ -270,7 +270,8 @@ fun SearchScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(filteredItems, key = { it.id }) { item ->
+                    items(filteredItems.size, key = { index -> "${filteredItems[index].id}_$index" }) { index ->
+                        val item = filteredItems[index]
                         MediaCard(
                             item = item,
                             onClick = onMediaClick

@@ -153,7 +153,8 @@ fun MyListScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(watchlist, key = { it.id }) { item ->
+                items(watchlist.size, key = { index -> "${watchlist[index].id}_$index" }) { index ->
+                    val item = watchlist[index]
                     WatchlistCard(
                         item = item,
                         onClick = { onMediaClick(item) },

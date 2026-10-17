@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -102,7 +103,7 @@ private val AD_DOMAINS = listOf(
     "paviliongiddy.com", "bondeddarkenedswerve.com", "crowbarrinds.com",
     "dinomysstorm.com", "21wiz.com", "acscdn.com", "superficial-disaster.com",
     "hilltopads.com", "monetag.com", "a-ads.com", "displayvertising.com",
-    "cloudfront.net", "ptekuwiny.pro", "loyal-product.com"
+    "ptekuwiny.pro", "loyal-product.com"
 )
 
 data class PlayerTrackOption(
@@ -832,12 +833,20 @@ fun HybridStreamPlayer(
                         settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
+                            databaseEnabled = true
+                            allowFileAccess = true
+                            allowContentAccess = true
+                            loadWithOverviewMode = true
+                            useWideViewPort = true
                             mediaPlaybackRequiresUserGesture = false
                             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                             userAgentString = stream.headers["User-Agent"]
-                            javaScriptCanOpenWindowsAutomatically = false
+                                ?: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                            javaScriptCanOpenWindowsAutomatically = true
                             setSupportMultipleWindows(false)
                         }
+
+                        webChromeClient = WebChromeClient()
 
                         webViewClient = object : WebViewClient() {
                             override fun shouldInterceptRequest(
@@ -860,8 +869,12 @@ fun HybridStreamPlayer(
                                 request: WebResourceRequest?
                             ): Boolean {
                                 val targetUrl = request?.url?.toString().orEmpty()
-                                val embedHost = Uri.parse(stream.url).host.orEmpty()
-                                return !targetUrl.contains(embedHost)
+                                val lower = targetUrl.lowercase()
+                                if (AD_DOMAINS.any { lower.contains(it) }) return true
+                                if (lower.startsWith("intent:") || lower.startsWith("market:") || lower.startsWith("tel:") || lower.startsWith("mailto:")) {
+                                    return true
+                                }
+                                return false
                             }
                         }
 

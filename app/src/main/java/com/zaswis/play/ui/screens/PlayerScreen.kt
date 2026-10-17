@@ -61,6 +61,8 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -468,6 +470,14 @@ fun HybridServerPlayerView(
     }
 }
 
+data class NativeTrackOption(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val name: String,
+    val language: String,
+    val isSelected: Boolean
+)
+
 @OptIn(UnstableApi::class)
 @Composable
 fun NativeExoPlayerView(
@@ -503,6 +513,12 @@ fun NativeExoPlayerView(
     }
     var resolutionError by remember(item.id) { mutableStateOf<String?>(null) }
 
+    // Dynamic Tracks & Quality State
+    var audioTracks by remember { mutableStateOf<List<NativeTrackOption>>(emptyList()) }
+    var textTracks by remember { mutableStateOf<List<NativeTrackOption>>(emptyList()) }
+    var videoTracks by remember { mutableStateOf<List<NativeTrackOption>>(emptyList()) }
+    var areSubtitlesOff by remember { mutableStateOf(false) }
+
     LaunchedEffect(item.id) {
         if (activeSources.isEmpty() && (item.embedUrls.isNotEmpty() || item.pageUrl.isNotEmpty())) {
             isResolving = true
@@ -533,8 +549,6 @@ fun NativeExoPlayerView(
 
     // CloudStream Settings State
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var selectedAudioTrack by remember { mutableStateOf("Default / Original") }
-    var selectedSubtitleTrack by remember { mutableStateOf("Off") }
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var isZoomMode by remember { mutableStateOf(false) }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
@@ -590,10 +604,109 @@ fun NativeExoPlayerView(
             .build()
     }
 
+    fun refreshTracks() {
+        val tracks = exoPlayer.currentTracks
+        val audioList = mutableListOf<NativeTrackOption>()
+        val textList = mutableListOf<NativeTrackOption>()
+        val videoList = mutableListOf<NativeTrackOption>()
+        val isTextDisabled = exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+
+        for (groupIndex in 0 until tracks.groups.size) {
+            val group = tracks.groups[groupIndex]
+            val type = group.type
+            for (trackIndex in 0 until group.length) {
+                val format = group.getTrackFormat(trackIndex)
+                val isSelected = group.isTrackSelected(trackIndex)
+                val lang = format.language.orEmpty()
+                val label = when {
+                    !format.label.isNullOrBlank() -> format.label!!
+                    lang.isNotBlank() && lang != "und" -> {
+                        try {
+                            java.util.Locale.forLanguageTag(lang).getDisplayLanguage(java.util.Locale.ENGLISH).ifBlank { lang }
+                        } catch (_: Exception) {
+                            lang
+                        }
+                    }
+                    type == C.TRACK_TYPE_AUDIO -> "Audio Track ${trackIndex + 1}"
+                    type == C.TRACK_TYPE_VIDEO -> {
+                        if (format.height > 0) "${format.height}p" else "Quality ${trackIndex + 1}"
+                    }
+                    else -> "Subtitle Track ${trackIndex + 1}"
+                }
+
+                val option = NativeTrackOption(
+                    groupIndex = groupIndex,
+                    trackIndex = trackIndex,
+                    name = label,
+                    language = lang,
+                    isSelected = isSelected
+                )
+
+                if (type == C.TRACK_TYPE_AUDIO) {
+                    audioList.add(option)
+                } else if (type == C.TRACK_TYPE_TEXT) {
+                    textList.add(option)
+                } else if (type == C.TRACK_TYPE_VIDEO) {
+                    videoList.add(option)
+                }
+            }
+        }
+        audioTracks = audioList
+        textTracks = textList
+        videoTracks = videoList
+        areSubtitlesOff = isTextDisabled || textList.none { it.isSelected }
+    }
+
+    fun selectAudioTrack(track: NativeTrackOption) {
+        val currentTracks = exoPlayer.currentTracks
+        if (track.groupIndex < currentTracks.groups.size) {
+            val group = currentTracks.groups[track.groupIndex]
+            val override = TrackSelectionOverride(group.mediaTrackGroup, track.trackIndex)
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .setOverrideForType(override)
+                .build()
+            refreshTracks()
+        }
+    }
+
+    fun selectTextTrack(track: NativeTrackOption?) {
+        if (track == null) {
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .build()
+        } else {
+            val currentTracks = exoPlayer.currentTracks
+            if (track.groupIndex < currentTracks.groups.size) {
+                val group = currentTracks.groups[track.groupIndex]
+                val override = TrackSelectionOverride(group.mediaTrackGroup, track.trackIndex)
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(override)
+                    .build()
+            }
+        }
+        refreshTracks()
+    }
+
+    fun selectVideoTrack(track: NativeTrackOption) {
+        val currentTracks = exoPlayer.currentTracks
+        if (track.groupIndex < currentTracks.groups.size) {
+            val group = currentTracks.groups[track.groupIndex]
+            val override = TrackSelectionOverride(group.mediaTrackGroup, track.trackIndex)
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+                .setOverrideForType(override)
+                .build()
+            refreshTracks()
+        }
+    }
+
     LaunchedEffect(currentSource?.url) {
         val source = currentSource
         val url = source?.url
-        if (!url.isNullOrBlank()) {
+        if (!url.isNullOrBlank() && exoPlayer.currentMediaItem == null) {
             prepareHeadersForSource(source)
             try {
                 val mediaItem = buildExoMediaItem(source)
@@ -636,6 +749,10 @@ fun NativeExoPlayerView(
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                refreshTracks()
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 isBuffering = false
                 if (selectedSourceIndex + 1 < activeSources.size) {
@@ -647,6 +764,7 @@ fun NativeExoPlayerView(
             }
         }
         exoPlayer.addListener(listener)
+        refreshTracks()
         onDispose {
             exoPlayer.removeListener(listener)
             exoPlayer.stop()
@@ -970,16 +1088,91 @@ fun NativeExoPlayerView(
                             letterSpacing = 1.sp
                         )
 
-                        activeSources.forEachIndexed { index, source ->
-                            val isSelected = index == selectedSourceIndex
+                        if (activeSources.size > 1) {
+                            activeSources.forEachIndexed { index, source ->
+                                val isSelected = index == selectedSourceIndex
+                                Surface(
+                                    onClick = {
+                                        switchQuality(index)
+                                        showSettingsDialog = false
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
+                                    border = if (isSelected) BorderStroke(1.dp, NetflixRed) else null,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = source.quality,
+                                                color = NetflixWhite,
+                                                fontSize = 14.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                            Text(
+                                                text = "${source.serverName} #${index + 1}",
+                                                color = NetflixLightGrey,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = ZaswixIcons.Check,
+                                                contentDescription = "Selected",
+                                                tint = NetflixRed,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (videoTracks.size > 1) {
+                            videoTracks.forEach { track ->
+                                Surface(
+                                    onClick = {
+                                        selectVideoTrack(track)
+                                        showSettingsDialog = false
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (track.isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
+                                    border = if (track.isSelected) BorderStroke(1.dp, NetflixRed) else null,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "${track.name} (HLS Stream)",
+                                            color = NetflixWhite,
+                                            fontSize = 14.sp,
+                                            fontWeight = if (track.isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                        if (track.isSelected) {
+                                            Icon(
+                                                imageVector = ZaswixIcons.Check,
+                                                contentDescription = "Selected",
+                                                tint = NetflixRed,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                             Surface(
-                                onClick = {
-                                    switchQuality(index)
-                                    showSettingsDialog = false
-                                },
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
-                                border = if (isSelected) BorderStroke(1.dp, NetflixRed) else null,
+                                color = NetflixRed.copy(alpha = 0.2f),
+                                border = BorderStroke(1.dp, NetflixRed),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
@@ -991,25 +1184,23 @@ fun NativeExoPlayerView(
                                 ) {
                                     Column {
                                         Text(
-                                            text = source.quality,
+                                            text = currentSource?.quality?.ifEmpty { "1080p Full HD" } ?: "1080p Full HD",
                                             color = NetflixWhite,
                                             fontSize = 14.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = source.serverName,
+                                            text = currentSource?.serverName ?: "Direct Video Stream",
                                             color = NetflixLightGrey,
                                             fontSize = 11.sp
                                         )
                                     }
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = ZaswixIcons.Check,
-                                            contentDescription = "Selected",
-                                            tint = NetflixRed,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = ZaswixIcons.Check,
+                                        contentDescription = "Selected",
+                                        tint = NetflixRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
                             }
                         }
@@ -1024,55 +1215,46 @@ fun NativeExoPlayerView(
                             letterSpacing = 1.sp
                         )
 
-                        val audioOptions = listOf(
-                            "Default / Original Audio" to null,
-                            "Hindi (Dual Audio Dub)" to "hi",
-                            "English (Original / Dub)" to "en",
-                            "Japanese (Anime Voice)" to "ja"
-                        )
-
-                        audioOptions.forEach { (label, langCode) ->
-                            val isSelected = selectedAudioTrack == label
-                            Surface(
-                                onClick = {
-                                    selectedAudioTrack = label
-                                    if (langCode != null) {
-                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                            .buildUpon()
-                                            .setPreferredAudioLanguage(langCode)
-                                            .build()
-                                    } else {
-                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                            .buildUpon()
-                                            .setPreferredAudioLanguage(null)
-                                            .build()
-                                    }
-                                },
-                                shape = RoundedCornerShape(6.dp),
-                                color = if (isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
-                                border = if (isSelected) BorderStroke(1.dp, NetflixRed) else null,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(10.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                        if (audioTracks.isEmpty()) {
+                            Text(
+                                text = "Default / Embedded Audio Track",
+                                color = NetflixLightGrey,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        } else {
+                            audioTracks.forEach { track ->
+                                Surface(
+                                    onClick = {
+                                        selectAudioTrack(track)
+                                        showSettingsDialog = false
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (track.isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
+                                    border = if (track.isSelected) BorderStroke(1.dp, NetflixRed) else null,
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text(
-                                        text = label,
-                                        color = NetflixWhite,
-                                        fontSize = 13.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = ZaswixIcons.Check,
-                                            contentDescription = "Selected",
-                                            tint = NetflixRed,
-                                            modifier = Modifier.size(16.dp)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = track.name,
+                                            color = NetflixWhite,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (track.isSelected) FontWeight.Bold else FontWeight.Normal
                                         )
+                                        if (track.isSelected) {
+                                            Icon(
+                                                imageVector = ZaswixIcons.Check,
+                                                contentDescription = "Selected",
+                                                tint = NetflixRed,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1088,34 +1270,49 @@ fun NativeExoPlayerView(
                             letterSpacing = 1.sp
                         )
 
-                        val subOptions = listOf(
-                            "Off / Disable Subtitles" to null,
-                            "English Subtitles [CC]" to "en",
-                            "Hindi Subtitles" to "hi",
-                            "Japanese Subtitles" to "ja"
-                        )
+                        Surface(
+                            onClick = {
+                                selectTextTrack(null)
+                                showSettingsDialog = false
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (areSubtitlesOff) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
+                            border = if (areSubtitlesOff) BorderStroke(1.dp, NetflixRed) else null,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Off / Disable Subtitles",
+                                    color = NetflixWhite,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (areSubtitlesOff) FontWeight.Bold else FontWeight.Normal
+                                )
+                                if (areSubtitlesOff) {
+                                    Icon(
+                                        imageVector = ZaswixIcons.Check,
+                                        contentDescription = "Selected",
+                                        tint = NetflixRed,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
 
-                        subOptions.forEach { (label, langCode) ->
-                            val isSelected = selectedSubtitleTrack == label
+                        textTracks.forEach { track ->
                             Surface(
                                 onClick = {
-                                    selectedSubtitleTrack = label
-                                    if (langCode != null) {
-                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                            .buildUpon()
-                                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                            .setPreferredTextLanguage(langCode)
-                                            .build()
-                                    } else {
-                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                            .buildUpon()
-                                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                                            .build()
-                                    }
+                                    selectTextTrack(track)
+                                    showSettingsDialog = false
                                 },
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (isSelected) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
-                                border = if (isSelected) BorderStroke(1.dp, NetflixRed) else null,
+                                color = if (track.isSelected && !areSubtitlesOff) NetflixRed.copy(alpha = 0.2f) else NetflixDarkGrey,
+                                border = if (track.isSelected && !areSubtitlesOff) BorderStroke(1.dp, NetflixRed) else null,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
@@ -1126,12 +1323,12 @@ fun NativeExoPlayerView(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = label,
+                                        text = track.name,
                                         color = NetflixWhite,
                                         fontSize = 13.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        fontWeight = if (track.isSelected && !areSubtitlesOff) FontWeight.Bold else FontWeight.Normal
                                     )
-                                    if (isSelected) {
+                                    if (track.isSelected && !areSubtitlesOff) {
                                         Icon(
                                             imageVector = ZaswixIcons.Check,
                                             contentDescription = "Selected",

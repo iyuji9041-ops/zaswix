@@ -89,19 +89,21 @@ fun DetailsScreen(
 
     // Automatic Background Link Extraction (Cloudstream style: auto-scrape and resolve)
     LaunchedEffect(item.id) {
-        val isDetailsProvider = item.pageUrl.contains("multimovies", ignoreCase = true) ||
-                item.providerName.contains("multimovies", ignoreCase = true) ||
-                item.pageUrl.contains("toonstream", ignoreCase = true) ||
-                item.providerName.contains("toonstream", ignoreCase = true)
-
-        if (isDetailsProvider && item.pageUrl.isNotEmpty()) {
+        if (item.pageUrl.isNotEmpty()) {
             isLoadingDetails = true
             val payload = mediaRepository.loadMediaDetails(item.pageUrl, item.providerName)
-            if (payload != null) {
+            if (payload != null && (payload.servers.isNotEmpty() || payload.episodes.isNotEmpty() || payload.synopsis.isNotEmpty())) {
                 detailsPayload = payload
+            } else if (item.embedUrls.isNotEmpty() || item.pageUrl.isNotEmpty()) {
+                isAutoResolving = true
+                val resolved = mediaRepository.autoResolveMediaStreams(item)
+                if (resolved.isNotEmpty()) {
+                    currentStreams = resolved
+                }
+                isAutoResolving = false
             }
             isLoadingDetails = false
-        } else if (item.embedUrls.isNotEmpty() || item.pageUrl.isNotEmpty()) {
+        } else if (item.embedUrls.isNotEmpty()) {
             isAutoResolving = true
             val resolved = mediaRepository.autoResolveMediaStreams(item)
             if (resolved.isNotEmpty()) {

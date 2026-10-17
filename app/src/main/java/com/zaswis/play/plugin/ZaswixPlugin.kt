@@ -28,10 +28,28 @@ data class MediaDetails(
 
 /**
  * Standard contract for dynamic Zaswix plugins loaded via DexClassLoader.
+ * Provides mutual fallback for both getProviderName() and getName() so that
+ * plugins implementing either providerName or name (or neither) load without AbstractMethodError.
  */
 interface ZaswixPlugin {
+    val name: String
+        get() = try {
+            val m = javaClass.methods.firstOrNull { it.name == "getProviderName" && it.parameterCount == 0 }
+            (m?.invoke(this) as? String) ?: javaClass.simpleName
+        } catch (_: Throwable) {
+            javaClass.simpleName
+        }
+
     val providerName: String
+        get() = try {
+            val m = javaClass.methods.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
+            (m?.invoke(this) as? String) ?: name
+        } catch (_: Throwable) {
+            name
+        }
+
     val version: String
+        get() = "1.0.0"
 
     suspend fun getHomePage(): HomePagePayload
     suspend fun search(query: String): List<MediaItem>
